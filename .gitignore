@@ -1,0 +1,5 @@
+holyd.exe
+holyd
+*.o
+*.d
+*.exe.stdout.txt

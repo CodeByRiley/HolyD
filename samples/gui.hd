@@ -1,0 +1,127 @@
+/* gui.hd , the windowing FFI end to end.
+ *
+ *     holyd holyd/gui.hd
+ *
+ * Arrows move the box, click to teleport it under the pointer, SPACE
+ * recentres, ESC or the close button quits. The shape of the loop , drain
+ * every event, redraw the whole surface from state, invalidate, sleep , is
+ * the shape every winman client takes; the Win* natives are lib/wm and
+ * lib/gfx under HolyD names.
+ *
+ * Two dialect notes, so the code below does not read as clumsy: there is no
+ * `break`, so the loops carry a flag, and `~` is the string join operator ,
+ * Str() is what turns an I64 into something WinDrawText will take.
+ */
+
+I64 WIN_W = 420;
+I64 WIN_H = 260;
+I64 BOX = 40;
+I64 STEP = 8;
+I64 HEADER_H = 24;
+
+U0 DrawFrame(I64 win, I64 bx, I64 by, I64 mx, I64 my, I64 clicks) {
+    I64 w = WinWidth(win);
+    I64 h = WinHeight(win);
+
+    WinClear(win, COLOR_DARK_GRAY);
+
+    /* Header strip, bevelled so it reads as chrome rather than as paint. */
+    WinFillRect(win, 0, 0, w, HEADER_H, COLOR_GRAY);
+    WinBevel(win, 0, 0, w, HEADER_H, 0x00C0C0C0, 0x00202020, 1);
+    WinDrawText(win, 8, 8, "HolyD windowing demo", COLOR_WHITE, 1);
+
+    /* The box: filled, then outlined a shade brighter. */
+    WinFillRect(win, bx, by, BOX, BOX, COLOR_BLUE);
+    WinDrawRect(win, bx, by, BOX, BOX, COLOR_CYAN, 2);
+
+    /* Crosshair on the pointer, to show that mouse coordinates arrive in
+     * client space and need no adjusting. */
+    WinHLine(win, mx - 6, my, 13, COLOR_YELLOW);
+    WinVLine(win, mx, my - 6, 13, COLOR_YELLOW);
+
+    WinDrawText(win, 8, h - 40, "clicks: " ~ Str(clicks), COLOR_WHITE, 1);
+    WinDrawText(win, 8, h - 24, "arrows move  space centres  esc quits",
+                COLOR_GRAY, 1);
+
+    /* Right-aligned, which is what WinTextWidth is for. */
+    auto pos = Str(mx) ~ "," ~ Str(my);
+    WinDrawText(win, w - WinTextWidth(pos) - 8, h - 40, pos, COLOR_GREEN, 1);
+}
+
+U0 main() {
+    I64 win = WinCreate(WIN_W, WIN_H, "HolyD GUI", WIN_STATUSBAR);
+    if (win < 0) {
+        PrintLn("gui: WinCreate failed , is winman running?");
+        return -1;
+    }
+
+    WinSetStatus(win, "ready");
+
+    I64 bx = (WIN_W - BOX) / 2;
+    I64 by = (WIN_H - BOX) / 2;
+    I64 mx = 0;
+    I64 my = 0;
+    I64 clicks = 0;
+    I64 running = 1;
+
+    while (running == 1) {
+        /* Drain the queue before drawing, so one frame reflects everything
+         * that happened since the last one. */
+        I64 ev = WinPollEvent(win);
+
+        while (ev != EV_NONE) {
+            if (ev == EV_KEY_DOWN) {
+                I64 key = WinEventKey();
+                if (key == KEY_ESC) {
+                    running = 0;
+                } else if (key == KEY_SPACE) {
+                    bx = (WinWidth(win) - BOX) / 2;
+                    by = (WinHeight(win) - BOX) / 2;
+                } else if (key == KEY_LEFT) {
+                    bx = bx - STEP;
+                } else if (key == KEY_RIGHT) {
+                    bx = bx + STEP;
+                } else if (key == KEY_UP) {
+                    by = by - STEP;
+                } else if (key == KEY_DOWN) {
+                    by = by + STEP;
+                }
+            } else if (ev == EV_MOUSE_MOVE) {
+                mx = WinEventX();
+                my = WinEventY();
+            } else if (ev == EV_MOUSE_DOWN) {
+                mx = WinEventX();
+                my = WinEventY();
+                bx = mx - BOX / 2;
+                by = my - BOX / 2;
+                clicks = clicks + 1;
+                WinSetStatus(win, "clicks: " ~ Str(clicks));
+            } else if (ev == EV_QUIT) {
+                running = 0;
+            }
+
+            ev = WinPollEvent(win);
+        }
+
+        /* Keep the box inside the client area. It can leave through a
+         * resize as easily as through an arrow key, so clamp against the
+         * live size rather than the size asked for at creation. */
+        I64 w = WinWidth(win);
+        I64 h = WinHeight(win);
+        if (bx < 0) { bx = 0; }
+        if (by < HEADER_H) { by = HEADER_H; }
+        if (bx > w - BOX) { bx = w - BOX; }
+        if (by > h - BOX) { by = h - BOX; }
+
+        DrawFrame(win, bx, by, mx, my, clicks);
+        WinInvalidate(win);
+
+        /* Without this the loop spins and starves winman of the CPU it
+         * needs to composite what was just drawn. */
+        Sleep(16);
+    }
+
+    WinDestroy(win);
+    PrintLn("gui: done");
+    return 0;
+}

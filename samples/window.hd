@@ -1,0 +1,60 @@
+U0 main() {
+  I64 win = WinCreate(400, 300);
+
+  if (win < 0) {
+    PrintLn("Failed to create window!");
+    return -1;
+  }
+  WinSetStatus(win, "ready");
+	I64 running = 1;
+
+  while (running) {
+    I64 ev = WinPollEvent(win);
+		while (ev != EV_NONE) {
+			if (ev == EV_KEY_DOWN) {
+				I64 key = WinEventKey();
+				if (key == KEY_ESC) {
+                    running = 0;
+        }
+			} else if (ev == EV_QUIT) {
+        running = 0;
+      }
+			ev = WinPollEvent(win);
+		}
+
+  	WinDrawText(win, 50, 50, "Hello from HolyD GUI!");
+  	WinInvalidate(win);
+    Sleep(16);
+
+  }
+  WinDestroy(win);
+  PrintLn("gui: done");
+  return 0;
+}
+
+//U8 main() {
+//  PrintLn("Creating window...");
+
+//  I64 win = WinCreate(400, 300, "HolyD GUI App!");
+
+//  if (win < 0) {
+//    PrintLn("Failed to create window!");
+//    return -1;
+//  }
+
+//  PrintLn("Window created! Changing title...");
+//  WinSetTitle(win, "Title changed by HolyD!");
+
+  // Tell the window manager to redraw the window frame
+//  WinInvalidate(win);
+
+//  PrintLn("Window is open. Idling...");
+
+  // Keep the process alive so the window stays open
+//  while (true) {
+    // In a real GUI app, we would call WinPollEvent() here
+//  }
+
+//  WinDestroy(win);
+//  return 0;
+//}
