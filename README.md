@@ -90,21 +90,38 @@ and sockets did, and those are `ffi_platform.h`.
 
 ## Relationship to TOS
 
-**TOS is upstream.** `vendor/tos/` and `src/` are copies, and
-`tools/sync-from-tos.sh ../TOS` refreshes them.
+**This repository is upstream.** TOS consumes it as a submodule at
+`userspace/bin/holyd`, and builds `src/` into the OS image with `ffi_tos.c`
+as the host. Changing the language means committing here, then bumping the
+pointer in TOS:
 
-That is not tidiness, it is a real constraint: `lib/gfx.c` and `lib/bmp.c`
-are shared with winman and the rest of the TOS desktop, so TOS cannot give
-them up, and the HolyD sources still build into the TOS image as
-`userspace/bin/holyd`. Two trees, one direction of travel.
+```
+# in the TOS tree
+cd userspace/bin/holyd
+git commit -am "..." && git push
+cd ../../..
+git add userspace/bin/holyd && git commit -m "holyd: bump"
+```
 
-The exception is `vendor/tos/lib/syscall.h`, which this repository owns. TOS's
-real one is the whole kernel interface; `bmp.c` wants four calls out of it,
-and that file is those four.
+TOS's samples on the image come from `samples/` and `tests/` here, so those
+have one home too.
 
-To collapse the duplication later, make TOS's `userspace/bin/holyd` a
-submodule of this repository and point its `HOLYD_SRC_DIR` at the submodule's
-`src/`. That needs a remote to exist first, which is why it is not done here.
+`vendor/tos/` runs the other way: `lib/gfx.c` and `lib/bmp.c` are shared with
+winman and the rest of the TOS desktop, so TOS owns them and this repository
+needs a copy to draw when built on its own. `tools/sync-from-tos.sh ../TOS`
+refreshes those six files and nothing else.
+
+`vendor/tos/lib/syscall.h` is the exception to the exception , this
+repository owns it. TOS's real one is the whole kernel interface; `bmp.c`
+wants four calls out of it, and that file is those four.
+
+Because it is a submodule, a fresh TOS clone needs the extra step:
+
+```
+git clone --recursive https://github.com/CodeByRiley/TOS.git
+# or, in an existing clone
+git submodule update --init
+```
 
 ## Language
 

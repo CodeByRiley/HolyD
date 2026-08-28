@@ -1,0 +1,25 @@
+# Shell scripts must keep LF endings.
+#
+# tools/sync-from-tos.sh runs under bash. On a fresh checkout Git's autocrlf
+# turns its line endings into CRLF, and bash then reads the first line as
+# `set -euo pipefail\r` and dies with "set: pipefail: invalid option name".
+# A long-lived working copy usually still has LF, so this only breaks for
+# someone cloning fresh , which is everyone but the author. TOS hit exactly
+# this and fixed it the same way.
+*.sh text eol=lf
+
+# .hd scripts get copied into a FAT image and read by holyd's lexer. The
+# lexer treats \r as whitespace so CRLF parses, but pinning them keeps the
+# bytes on the image identical to the bytes in the repository.
+*.hd text eol=lf
+
+# Sources, so a diff between this repository and a TOS checkout is about
+# content rather than line endings.
+*.c text eol=lf
+*.h text eol=lf
+Makefile text eol=lf
+
+# Binary payloads: never touch, never diff as text.
+*.png binary
+*.exe binary
+*.elf binary
