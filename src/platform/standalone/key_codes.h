@@ -1,12 +1,11 @@
-/* userspace/include/key_codes.h , PC keyboard scancodes.
+/* HolyD standalone key codes , PC keyboard scancodes.
  *
- * Subset of Linux's input-event-codes.h, used by apps that handle raw
- * keypresses (the shell, DOOM, the WM). Must stay in lockstep with the
- * kernel-side copy at kernel/input/key_codes.h , both ends compare
- * literal numeric values across the syscall boundary.
+ * Subset of Linux's input-event-codes.h. These values form the script-facing
+ * input ABI and match the scan codes produced by HolyD's Windows host; a TOS
+ * build selects TOS's own header through src/platform/key_codes.h.
  */
-#ifndef KEY_CODES_H
-#define KEY_CODES_H
+#ifndef HOLYD_STANDALONE_KEY_CODES_H
+#define HOLYD_STANDALONE_KEY_CODES_H
 
 #define KEY_RESERVED    0
 

@@ -1,4 +1,4 @@
-/* userspace/lib/gfx.h , 2D drawing over a pixel buffer.
+/* HolyD standalone gfx API , 2D drawing over a pixel buffer.
  *
  * The primitives winman and its clients both need: rectangles, fills,
  * blits, font8x8 text, mask stamping and BMP drawing, all clipped so a
@@ -14,12 +14,12 @@
  * Coordinates are pixels, and `stride` is in pixels rather than bytes ,
  * a surface over a wm window is (pitch / 4).
  *
- * Implementation: userspace/lib/gfx.c.
+ * Implementation: src/platform/standalone/gfx.c.
  */
 #ifndef GFX_H
 #define GFX_H
 
-#include "bmp.h"
+#include "../bmp.h"
 #include <stdint.h>
 #include <stddef.h>
 

@@ -7,6 +7,10 @@ static ASTNode* ParseExpression(Parser* parser);
 static ASTNode* ParseStatement(Parser* parser);
 static ASTNode* ParseBlock(Parser* parser);
 static ASTNode* ParseAssignmentExpression(Parser* parser);
+static TypeSyntax* ParseTypeSyntax(Parser* parser);
+static int ParseParameterList(Parser* parser, int require_names,
+                              ParameterSyntax** parameters_out,
+                              int* parameter_count_out);
 
 static int append_node(ASTNode*** items, int* count, int* capacity, ASTNode* node) {
     if (*count >= *capacity) {
@@ -26,6 +30,29 @@ static int append_node(ASTNode*** items, int* count, int* capacity, ASTNode* nod
     }
 
     (*items)[(*count)++] = node;
+    return 1;
+}
+
+static int append_parameter(ParameterSyntax** items, int* count, int* capacity,
+                            ParameterSyntax parameter) {
+    if (*count >= *capacity) {
+        int new_capacity = *capacity ? *capacity * 2 : 8;
+        ParameterSyntax* grown = (ParameterSyntax*)malloc(
+            sizeof(ParameterSyntax) * new_capacity);
+        if (grown == NULL) {
+            printf("Parse error: out of memory while growing parameter list.\n");
+            return 0;
+        }
+
+        for (int i = 0; i < *count; i++) {
+            grown[i] = (*items)[i];
+        }
+        free(*items);
+        *items = grown;
+        *capacity = new_capacity;
+    }
+
+    (*items)[(*count)++] = parameter;
     return 1;
 }
 
@@ -79,24 +106,316 @@ static int is_type_token(TokenType type) {
     }
 }
 
-static Token consume_type(Parser* parser) {
-    Token type_token = parser->current;
-    if (!is_type_token(type_token.type)) {
+static int is_type_qualifier_token(TokenType type) {
+    return type == TOKEN_CONST || type == TOKEN_IMMUTABLE ||
+           type == TOKEN_SHARED || type == TOKEN_INOUT;
+}
+
+static int is_type_start_token(TokenType type) {
+    return is_type_token(type) || type == TOKEN_IDENTIFIER ||
+           is_type_qualifier_token(type) || type == TOKEN_TYPEOF;
+}
+
+static TypeQualifier qualifier_from_token(TokenType type) {
+    switch (type) {
+        case TOKEN_IMMUTABLE: return TYPE_QUALIFIER_IMMUTABLE;
+        case TOKEN_SHARED: return TYPE_QUALIFIER_SHARED;
+        case TOKEN_INOUT: return TYPE_QUALIFIER_INOUT;
+        case TOKEN_CONST:
+        default: return TYPE_QUALIFIER_CONST;
+    }
+}
+
+static TypeSyntax* require_type_node(Parser* parser, TypeSyntax* type) {
+    if (type == NULL) {
         parser->had_error = 1;
-        printf("Parse error: Expected type on line %d\n", parser->lexer.line);
-        return type_token;
+        printf("Parse error: out of memory while building type syntax.\n");
+    }
+    return type;
+}
+
+static TypeSyntax* ParseTypePrimary(Parser* parser) {
+    if (is_type_qualifier_token(parser->current.type)) {
+        TypeQualifier qualifier = qualifier_from_token(parser->current.type);
+        advance(parser);
+
+        TypeSyntax* base_type = NULL;
+        if (match(parser, TOKEN_LPAREN)) {
+            base_type = ParseTypeSyntax(parser);
+            if (!match(parser, TOKEN_RPAREN)) {
+                parser->had_error = 1;
+                printf("Parse error: Expected ')' after qualified type on line %zu\n",
+                       parser->lexer.line);
+                return NULL;
+            }
+        } else {
+            /* D also accepts `const I64`. Only parsing the following primary
+             * makes `const I64*` equivalent to `const(I64)*`; parentheses can
+             * still express `const(I64*)`. */
+            base_type = ParseTypePrimary(parser);
+        }
+
+        if (base_type == NULL) return NULL;
+        return require_type_node(
+            parser, TypeSyntaxNewQualified(qualifier, base_type));
+    }
+
+    if (match(parser, TOKEN_TYPEOF)) {
+        if (!match(parser, TOKEN_LPAREN)) {
+            parser->had_error = 1;
+            printf("Parse error: Expected '(' after typeof on line %zu\n",
+                   parser->lexer.line);
+            return NULL;
+        }
+
+        ASTNode* expression = ParseExpression(parser);
+        if (expression == NULL || !match(parser, TOKEN_RPAREN)) {
+            parser->had_error = 1;
+            printf("Parse error: Expected ')' after typeof expression on line %zu\n",
+                   parser->lexer.line);
+            return NULL;
+        }
+        return require_type_node(parser, TypeSyntaxNewTypeof(expression));
+    }
+
+    Token name = parser->current;
+    if (!is_type_token(name.type) && name.type != TOKEN_IDENTIFIER) {
+        parser->had_error = 1;
+        printf("Parse error: Expected type on line %zu\n", parser->lexer.line);
+        return NULL;
     }
 
     advance(parser);
-    while (match(parser, TOKEN_LBRACKET)) {
-        if (!match(parser, TOKEN_RBRACKET)) {
-            parser->had_error = 1;
-            printf("Parse error: Expected ']' after array type on line %d\n", parser->lexer.line);
+    return require_type_node(
+        parser, TypeSyntaxNewNamed(name.start, name.length));
+}
+
+/* `Value[Key]` and `Value[length]` overlap when the brackets contain one
+ * identifier. Until name resolution can distinguish a type from a constant,
+ * that one ambiguous form remains a static array. Built-in and constructed
+ * key types are unambiguous and become associative arrays here. */
+static int TryParseAssociativeKey(Parser* parser, TypeSyntax** key_out) {
+    if (!is_type_start_token(parser->current.type)) return 0;
+
+    Parser saved = *parser;
+    TokenType first = parser->current.type;
+    TypeSyntax* candidate = ParseTypeSyntax(parser);
+    int simple_identifier = candidate != NULL &&
+                            candidate->kind == TYPE_SYNTAX_NAMED &&
+                            first == TOKEN_IDENTIFIER;
+
+    if (candidate != NULL && !simple_identifier &&
+        check(parser, TOKEN_RBRACKET)) {
+        *key_out = candidate;
+        return 1;
+    }
+
+    *parser = saved;
+    return 0;
+}
+
+static TypeSyntax* ParseTypeSyntax(Parser* parser) {
+    TypeSyntax* type = ParseTypePrimary(parser);
+    if (type == NULL) return NULL;
+
+    for (;;) {
+        if (match(parser, TOKEN_STAR)) {
+            type = require_type_node(parser, TypeSyntaxNewPointer(type));
+        } else if (match(parser, TOKEN_LBRACKET)) {
+            if (match(parser, TOKEN_RBRACKET)) {
+                type = require_type_node(
+                    parser, TypeSyntaxNewDynamicArray(type));
+            } else {
+                TypeSyntax* key_type = NULL;
+                if (TryParseAssociativeKey(parser, &key_type)) {
+                    advance(parser); /* closing ']' */
+                    type = require_type_node(
+                        parser, TypeSyntaxNewAssocArray(type, key_type));
+                } else {
+                    ASTNode* length = ParseExpression(parser);
+                    if (length == NULL || !match(parser, TOKEN_RBRACKET)) {
+                        parser->had_error = 1;
+                        printf("Parse error: Expected ']' after array length on line %zu\n",
+                               parser->lexer.line);
+                        return NULL;
+                    }
+                    type = require_type_node(
+                        parser, TypeSyntaxNewStaticArray(type, length));
+                }
+            }
+        } else if (match(parser, TOKEN_FUNCTION) ||
+                   match(parser, TOKEN_DELEGATE)) {
+            TokenType callable_kind = parser->previous.type;
+            if (!match(parser, TOKEN_LPAREN)) {
+                parser->had_error = 1;
+                printf("Parse error: Expected '(' after %s on line %zu\n",
+                       callable_kind == TOKEN_FUNCTION ? "function" : "delegate",
+                       parser->lexer.line);
+                return NULL;
+            }
+
+            ParameterSyntax* parameters = NULL;
+            int parameter_count = 0;
+            if (!ParseParameterList(parser, 0, &parameters,
+                                    &parameter_count)) {
+                return NULL;
+            }
+
+            if (callable_kind == TOKEN_FUNCTION) {
+                type = require_type_node(
+                    parser, TypeSyntaxNewFunction(type, parameters,
+                                                  parameter_count));
+            } else {
+                type = require_type_node(
+                    parser, TypeSyntaxNewDelegate(type, parameters,
+                                                  parameter_count));
+            }
+        } else {
             break;
+        }
+
+        if (type == NULL) return NULL;
+    }
+
+    return type;
+}
+
+static int is_parameter_storage_token(TokenType type) {
+    return type == TOKEN_REF || type == TOKEN_OUT || type == TOKEN_LAZY ||
+           type == TOKEN_SCOPE;
+}
+
+static ParameterStorage parameter_storage_from_token(TokenType type) {
+    switch (type) {
+        case TOKEN_REF: return PARAMETER_STORAGE_REF;
+        case TOKEN_OUT: return PARAMETER_STORAGE_OUT;
+        case TOKEN_LAZY: return PARAMETER_STORAGE_LAZY;
+        case TOKEN_SCOPE: return PARAMETER_STORAGE_SCOPE;
+        default: return PARAMETER_STORAGE_NONE;
+    }
+}
+
+/* Function/delegate types may omit parameter names. Named function bodies
+ * keep requiring them because the current VM binds arguments by name. */
+static int ParseParameterList(Parser* parser, int require_names,
+                              ParameterSyntax** parameters_out,
+                              int* parameter_count_out) {
+    ParameterSyntax* parameters = NULL;
+    int parameter_count = 0;
+    int parameter_capacity = 0;
+
+    while (!check(parser, TOKEN_RPAREN) && !check(parser, TOKEN_EOF)) {
+        ParameterStorage storage = PARAMETER_STORAGE_NONE;
+        while (is_parameter_storage_token(parser->current.type)) {
+            ParameterStorage next =
+                parameter_storage_from_token(parser->current.type);
+            if ((storage & next) != 0) {
+                parser->had_error = 1;
+                printf("Parse error: duplicate parameter storage class on line %zu\n",
+                       parser->lexer.line);
+                return 0;
+            }
+
+            if (next != PARAMETER_STORAGE_SCOPE &&
+                (storage & (PARAMETER_STORAGE_REF | PARAMETER_STORAGE_OUT |
+                            PARAMETER_STORAGE_LAZY)) != 0) {
+                parser->had_error = 1;
+                printf("Parse error: ref, out, and lazy are mutually exclusive on line %zu\n",
+                       parser->lexer.line);
+                return 0;
+            }
+            storage = (ParameterStorage)(storage | next);
+            advance(parser);
+        }
+
+        if (check(parser, TOKEN_DOTDOTDOT)) {
+            parser->had_error = 1;
+            printf("Parse error: raw variadics need an explicit foreign ABI on line %zu\n",
+                   parser->lexer.line);
+            return 0;
+        }
+
+        if (!is_type_start_token(parser->current.type)) {
+            parser->had_error = 1;
+            printf("Parse error: Expected parameter type on line %zu\n",
+                   parser->lexer.line);
+            return 0;
+        }
+
+        ParameterSyntax parameter;
+        parameter.type = ParseTypeSyntax(parser);
+        parameter.name = NULL;
+        parameter.name_length = 0;
+        parameter.default_value = NULL;
+        parameter.storage = storage;
+        parameter.is_variadic = 0;
+        if (parameter.type == NULL) return 0;
+
+        if (match(parser, TOKEN_IDENTIFIER)) {
+            parameter.name = parser->previous.start;
+            parameter.name_length = parser->previous.length;
+        } else if (require_names) {
+            parser->had_error = 1;
+            printf("Parse error: Expected parameter name on line %zu\n",
+                   parser->lexer.line);
+            return 0;
+        }
+
+        if (match(parser, TOKEN_ASSIGN)) {
+            parameter.default_value = ParseExpression(parser);
+            if (parameter.default_value == NULL) return 0;
+        }
+
+        if (match(parser, TOKEN_DOTDOTDOT)) {
+            parameter.is_variadic = 1;
+        }
+
+        if (!append_parameter(&parameters, &parameter_count,
+                              &parameter_capacity, parameter)) {
+            parser->had_error = 1;
+            return 0;
+        }
+
+        if (!match(parser, TOKEN_COMMA)) break;
+        if (parameter.is_variadic) {
+            parser->had_error = 1;
+            printf("Parse error: variadic parameter must be last on line %zu\n",
+                   parser->lexer.line);
+            return 0;
         }
     }
 
-    return type_token;
+    if (!match(parser, TOKEN_RPAREN)) {
+        parser->had_error = 1;
+        printf("Parse error: Expected ')' after parameter list on line %zu\n",
+               parser->lexer.line);
+        return 0;
+    }
+
+    *parameters_out = parameters;
+    *parameter_count_out = parameter_count;
+    return 1;
+}
+
+/* A statement beginning with a user-defined type is ambiguous with an
+ * expression beginning with an identifier. Parse just the type syntax and
+ * keep it only when another identifier follows as the declared name. A later
+ * symbol-resolution pass can make the few genuinely ambiguous cases (such as
+ * `Foo * value`) semantic rather than syntactic. */
+static TypeSyntax* ParseOptionalDeclarationType(Parser* parser) {
+    if (!is_type_start_token(parser->current.type)) return NULL;
+    if (parser->current.type != TOKEN_IDENTIFIER) {
+        return ParseTypeSyntax(parser);
+    }
+
+    Parser saved = *parser;
+    TypeSyntax* type = ParseTypeSyntax(parser);
+    if (type != NULL && check(parser, TOKEN_IDENTIFIER)) {
+        return type;
+    }
+
+    *parser = saved;
+    return NULL;
 }
 
 static ASTNode* ParseNumber(Parser* parser) {
@@ -111,7 +430,7 @@ static ASTNode* ParseNumber(Parser* parser) {
         i = 2;
     }
 
-    for (; i < parser->previous.length; i++) {
+    for (; i < (int)parser->previous.length; i++) {
         char c = parser->previous.start[i];
         int digit = 0;
         if (c >= '0' && c <= '9') digit = c - '0';
@@ -184,7 +503,7 @@ static ASTNode* ParsePrimary(Parser* parser) {
     if (check(parser, TOKEN_DOTDOT) || check(parser, TOKEN_DOTDOTDOT)) {
         int is_range = check(parser, TOKEN_DOTDOT);
         parser->had_error = 1;
-        printf("Parse error: '%s' is not implemented on line %d "
+        printf("Parse error: '%s' is not implemented on line %zu "
                "(slices, case ranges and variadics are unbuilt)\n",
                is_range ? ".." : "...", parser->lexer.line);
         advance(parser);
@@ -201,13 +520,9 @@ static ASTNode* ParsePrimary(Parser* parser) {
         ASTNode* expr = ParseExpression(parser);
         if (!match(parser, TOKEN_RPAREN)) {
             parser->had_error = 1;
-            printf("Parse error: Expected ')' on line %d\n", parser->lexer.line);
+            printf("Parse error: Expected ')' on line %zu\n", parser->lexer.line);
         }
         return expr;
-    }
-
-    if (match(parser, TOKEN_MINUS)) {
-        return ASTNewBinaryOp(TOKEN_MINUS, ASTNewNumber(0), ParsePrimary(parser));
     }
 
     if (match(parser, TOKEN_IDENTIFIER)) {
@@ -245,7 +560,8 @@ static ASTNode* ParsePrimary(Parser* parser) {
 static int token_is_identifier_text(Token token, const char* text) {
     int len = 0;
     while (text[len]) len++;
-    return token.length == len && strncmp(token.start, text, (size_t)len) == 0;
+    return token.length == (size_t)len &&
+           strncmp(token.start, text, (size_t)len) == 0;
 }
 
 static ASTNode* ParsePostfix(Parser* parser) {
@@ -256,27 +572,28 @@ static ASTNode* ParsePostfix(Parser* parser) {
             ASTNode* index = ParseExpression(parser);
             if (check(parser, TOKEN_DOTDOT)) {
                 parser->had_error = 1;
-                printf("Parse error: array slices are not implemented on line %d\n",
+                printf("Parse error: array slices are not implemented on line %zu\n",
                        parser->lexer.line);
                 break;
             }
             if (!match(parser, TOKEN_RBRACKET)) {
                 parser->had_error = 1;
-                printf("Parse error: Expected ']' on line %d\n", parser->lexer.line);
+                printf("Parse error: Expected ']' on line %zu\n", parser->lexer.line);
             }
             node = ASTNewIndex(node, index);
         } else if (match(parser, TOKEN_DOT)) {
             if (!match(parser, TOKEN_IDENTIFIER)) {
                 parser->had_error = 1;
-                printf("Parse error: Expected property name after '.' on line %d\n", parser->lexer.line);
+                printf("Parse error: Expected property name after '.' on line %zu\n", parser->lexer.line);
                 break;
             }
             if (token_is_identifier_text(parser->previous, "length")) {
                 node = ASTNewArrayLenExpr(node);
             } else {
                 parser->had_error = 1;
-                printf("Parse error: Unknown property '%.*s' on line %d\n",
-                       parser->previous.length, parser->previous.start, parser->lexer.line);
+                printf("Parse error: Unknown property '%.*s' on line %zu\n",
+                       (int)parser->previous.length, parser->previous.start,
+                       parser->lexer.line);
             }
         } else {
             break;
@@ -286,20 +603,59 @@ static ASTNode* ParsePostfix(Parser* parser) {
     return node;
 }
 
-/* Binary precedence, tightest binding first:
- *   ParseTerm        *  /
- *   ParseAdditive    +  -  ~
- *   ParseComparison  <  >  <=  >=
- *   ParseExpression  ==  !=
+/* Binary precedence, loosest binding first. Each rung parses the tighter
+ * one on both sides, so `i < n + 1` groups as `i < (n + 1)` rather than
+ * folding to `(i < n) + 1`.
  *
- * Comparison used to share a rung with addition, so `i < n + 1` folded to
- * `(i < n) + 1`. Each rung now parses the tighter one on both sides. */
-static ASTNode* ParseTerm(Parser* parser) {
+ *   ParseExpression   ||
+ *   ParseLogicalOr    &&
+ *   ParseLogicalAnd   |
+ *   ParseBitOr        ^
+ *   ParseBitXor       &
+ *   ParseBitAnd       ==  !=
+ *   ParseEquality     <  >  <=  >=
+ *   ParseComparison   <<  >>  >>>
+ *   ParseShift        +  -  ~
+ *   ParseAdditive     *  /  %
+ *   ParseTerm         unary !  -
+ *   ParseUnary        ^^
+ *   ParsePower        postfix
+ *
+ * This follows D except that equality and relational sit on separate rungs
+ * here, as in C; D puts them on one non-associative level, so `a < b < c`
+ * is an error there and chains here. Worth revisiting with the rest of the
+ * D alignment rather than on its own.
+ */
+static ASTNode* ParseUnary(Parser* parser);
+
+/* ^^ binds tighter than unary minus and is right-associative, both as in D:
+ * -2 ^^ 2 is -(2 ^^ 2), and 2 ^^ 3 ^^ 2 is 2 ^^ (3 ^^ 2). Recursing into
+ * ParseUnary on the right gives both. */
+static ASTNode* ParsePower(Parser* parser) {
     ASTNode* node = ParsePostfix(parser);
-    while (check(parser, TOKEN_STAR) || check(parser, TOKEN_SLASH)) {
+    if (check(parser, TOKEN_POW)) {
+        advance(parser);
+        return ASTNewBinaryOp(TOKEN_POW, node, ParseUnary(parser));
+    }
+    return node;
+}
+
+static ASTNode* ParseUnary(Parser* parser) {
+    if (check(parser, TOKEN_BANG) || check(parser, TOKEN_MINUS)) {
         TokenType op = parser->current.type;
         advance(parser);
-        node = ASTNewBinaryOp(op, node, ParsePostfix(parser));
+        return ASTNewUnaryOp(op, ParseUnary(parser));
+    }
+    return ParsePower(parser);
+}
+
+static ASTNode* ParseTerm(Parser* parser) {
+    ASTNode* node = ParseUnary(parser);
+    while (check(parser, TOKEN_STAR) || check(parser, TOKEN_SLASH) ||
+           check(parser, TOKEN_PERCENT)) {
+        TokenType op = parser->current.type;
+        advance(parser);
+        node = ASTNewBinaryOp(op, node, ParseUnary(parser));
     }
     return node;
 }
@@ -315,10 +671,10 @@ static ASTNode* ParseAdditive(Parser* parser) {
     return node;
 }
 
-static ASTNode* ParseComparison(Parser* parser) {
+static ASTNode* ParseShift(Parser* parser) {
     ASTNode* node = ParseAdditive(parser);
-    while (check(parser, TOKEN_LT) || check(parser, TOKEN_GT) ||
-           check(parser, TOKEN_LTEQ) || check(parser, TOKEN_GTEQ)) {
+    while (check(parser, TOKEN_SHL) || check(parser, TOKEN_SHR) ||
+           check(parser, TOKEN_USHR)) {
         TokenType op = parser->current.type;
         advance(parser);
         node = ASTNewBinaryOp(op, node, ParseAdditive(parser));
@@ -326,7 +682,18 @@ static ASTNode* ParseComparison(Parser* parser) {
     return node;
 }
 
-static ASTNode* ParseExpression(Parser* parser) {
+static ASTNode* ParseComparison(Parser* parser) {
+    ASTNode* node = ParseShift(parser);
+    while (check(parser, TOKEN_LT) || check(parser, TOKEN_GT) ||
+           check(parser, TOKEN_LTEQ) || check(parser, TOKEN_GTEQ)) {
+        TokenType op = parser->current.type;
+        advance(parser);
+        node = ASTNewBinaryOp(op, node, ParseShift(parser));
+    }
+    return node;
+}
+
+static ASTNode* ParseEquality(Parser* parser) {
     ASTNode* node = ParseComparison(parser);
     while (check(parser, TOKEN_EQEQ) || check(parser, TOKEN_NEQ)) {
         TokenType op = parser->current.type;
@@ -336,11 +703,82 @@ static ASTNode* ParseExpression(Parser* parser) {
     return node;
 }
 
+/* '&' is TOKEN_AMPERSAND: the lexer emits one token for it whether it was
+ * meant as bitwise and or as address-of, and only the former parses. */
+static ASTNode* ParseBitAnd(Parser* parser) {
+    ASTNode* node = ParseEquality(parser);
+    while (check(parser, TOKEN_AMPERSAND)) {
+        advance(parser);
+        node = ASTNewBinaryOp(TOKEN_AMPERSAND, node, ParseEquality(parser));
+    }
+    return node;
+}
+
+static ASTNode* ParseBitXor(Parser* parser) {
+    ASTNode* node = ParseBitAnd(parser);
+    while (check(parser, TOKEN_XOR)) {
+        advance(parser);
+        node = ASTNewBinaryOp(TOKEN_XOR, node, ParseBitAnd(parser));
+    }
+    return node;
+}
+
+static ASTNode* ParseBitOr(Parser* parser) {
+    ASTNode* node = ParseBitXor(parser);
+    while (check(parser, TOKEN_OR)) {
+        advance(parser);
+        node = ASTNewBinaryOp(TOKEN_OR, node, ParseBitXor(parser));
+    }
+    return node;
+}
+
+static ASTNode* ParseLogicalAnd(Parser* parser) {
+    ASTNode* node = ParseBitOr(parser);
+    while (check(parser, TOKEN_ANDAND)) {
+        advance(parser);
+        node = ASTNewBinaryOp(TOKEN_ANDAND, node, ParseBitOr(parser));
+    }
+    return node;
+}
+
+static ASTNode* ParseExpression(Parser* parser) {
+    ASTNode* node = ParseLogicalAnd(parser);
+    while (check(parser, TOKEN_OROR)) {
+        advance(parser);
+        node = ASTNewBinaryOp(TOKEN_OROR, node, ParseLogicalAnd(parser));
+    }
+    return node;
+}
+
+/* `a += b` is `a = a + b`. The table is the only place the pairing between
+ * a compound token and its binary operator lives; TOKEN_UNKNOWN means the
+ * token was not a compound assignment at all. */
+static TokenType compound_binary_op(TokenType op) {
+    switch (op) {
+        case TOKEN_PLUS_ASSIGN:    return TOKEN_PLUS;
+        case TOKEN_MINUS_ASSIGN:   return TOKEN_MINUS;
+        case TOKEN_STAR_ASSIGN:    return TOKEN_STAR;
+        case TOKEN_SLASH_ASSIGN:   return TOKEN_SLASH;
+        case TOKEN_PERCENT_ASSIGN: return TOKEN_PERCENT;
+        case TOKEN_POW_ASSIGN:     return TOKEN_POW;
+        case TOKEN_TILDE_ASSIGN:   return TOKEN_TILDE;
+        case TOKEN_AND_ASSIGN:     return TOKEN_AMPERSAND;
+        case TOKEN_OR_ASSIGN:      return TOKEN_OR;
+        case TOKEN_XOR_ASSIGN:     return TOKEN_XOR;
+        case TOKEN_SHL_ASSIGN:     return TOKEN_SHL;
+        case TOKEN_SHR_ASSIGN:     return TOKEN_SHR;
+        case TOKEN_USHR_ASSIGN:    return TOKEN_USHR;
+        default:                   return TOKEN_UNKNOWN;
+    }
+}
+
 static ASTNode* make_inc_dec(ASTNode* target, TokenType op) {
     TokenType bin_op = op == TOKEN_PLUSPLUS ? TOKEN_PLUS : TOKEN_MINUS;
-    return ASTNewAssign(target->var_name, target->var_name_len,
+    return ASTNewAssign(target->as.variable_ref.name,
+                        target->as.variable_ref.name_length,
                         ASTNewBinaryOp(bin_op,
-                                       ASTNewVarRef(target->var_name, target->var_name_len),
+                                       ASTNewVarRef(target->as.variable_ref.name,
+                                                    target->as.variable_ref.name_length),
                                        ASTNewNumber(1)));
 }
 
@@ -348,7 +786,9 @@ static ASTNode* ParseAssignmentExpression(Parser* parser) {
     ASTNode* expr = ParseExpression(parser);
     if (expr != NULL && expr->type == AST_VAR_REF) {
         if (match(parser, TOKEN_ASSIGN)) {
-            return ASTNewAssign(expr->var_name, expr->var_name_len, ParseExpression(parser));
+            return ASTNewAssign(expr->as.variable_ref.name,
+                                expr->as.variable_ref.name_length,
+                                ParseExpression(parser));
         }
         if (match(parser, TOKEN_PLUSPLUS)) {
             return make_inc_dec(expr, TOKEN_PLUSPLUS);
@@ -356,11 +796,23 @@ static ASTNode* ParseAssignmentExpression(Parser* parser) {
         if (match(parser, TOKEN_MINUSMINUS)) {
             return make_inc_dec(expr, TOKEN_MINUSMINUS);
         }
+
+        TokenType compound = compound_binary_op(parser->current.type);
+        if (compound != TOKEN_UNKNOWN) {
+            advance(parser);
+            return ASTNewAssign(expr->as.variable_ref.name,
+                                expr->as.variable_ref.name_length,
+                                ASTNewBinaryOp(compound,
+                                               ASTNewVarRef(expr->as.variable_ref.name,
+                                                            expr->as.variable_ref.name_length),
+                                               ParseExpression(parser)));
+        }
     }
 
     if (expr != NULL && expr->type == AST_INDEX) {
         if (match(parser, TOKEN_ASSIGN)) {
-            return ASTNewIndexAssign(expr->index_target, expr->index_expr,
+            return ASTNewIndexAssign(expr->as.index_expr.target,
+                                     expr->as.index_expr.index,
                                      ParseExpression(parser));
         }
         /* arr[i]++ desugars to arr[i] = arr[i] + 1, which evaluates the
@@ -369,14 +821,26 @@ static ASTNode* ParseAssignmentExpression(Parser* parser) {
         if (match(parser, TOKEN_PLUSPLUS) || match(parser, TOKEN_MINUSMINUS)) {
             TokenType bin_op = parser->previous.type == TOKEN_PLUSPLUS
                                    ? TOKEN_PLUS : TOKEN_MINUS;
-            return ASTNewIndexAssign(expr->index_target, expr->index_expr,
+            return ASTNewIndexAssign(expr->as.index_expr.target,
+                                     expr->as.index_expr.index,
                                      ASTNewBinaryOp(bin_op, expr, ASTNewNumber(1)));
+        }
+
+        /* arr[i] += v evaluates the index twice, for the same reason and
+         * with the same caveat as arr[i]++ above. */
+        TokenType compound = compound_binary_op(parser->current.type);
+        if (compound != TOKEN_UNKNOWN) {
+            advance(parser);
+            return ASTNewIndexAssign(expr->as.index_expr.target,
+                                     expr->as.index_expr.index,
+                                     ASTNewBinaryOp(compound, expr,
+                                                    ParseExpression(parser)));
         }
     }
     return expr;
 }
 
-static ASTNode* ParseVarDecl(Parser* parser, TokenType type, Token name) {
+static ASTNode* ParseVarDecl(Parser* parser, TypeSyntax* type, Token name) {
     ASTNode* init = NULL;
     if (match(parser, TOKEN_ASSIGN)) {
         init = ParseExpression(parser);
@@ -414,16 +878,16 @@ static ASTNode* ParseForStatement(Parser* parser) {
 
     ASTNode* init = NULL;
     if (!match(parser, TOKEN_SEMICOLON)) {
-        if (is_type_token(parser->current.type)) {
-            Token type_token = consume_type(parser);
+        TypeSyntax* type = ParseOptionalDeclarationType(parser);
+        if (type != NULL) {
             if (!check(parser, TOKEN_IDENTIFIER)) {
                 parser->had_error = 1;
-                printf("Parse error: Expected variable name in for initializer on line %d\n", parser->lexer.line);
+                printf("Parse error: Expected variable name in for initializer on line %zu\n", parser->lexer.line);
                 return NULL;
             }
             Token name_token = parser->current;
             advance(parser);
-            init = ParseVarDecl(parser, type_token.type, name_token);
+            init = ParseVarDecl(parser, type, name_token);
         } else {
             init = ParseAssignmentExpression(parser);
             match(parser, TOKEN_SEMICOLON);
@@ -449,13 +913,11 @@ static ASTNode* ParseForStatement(Parser* parser) {
 static ASTNode* ParseForeach(Parser* parser) {
     match(parser, TOKEN_LPAREN);
 
-    if (is_type_token(parser->current.type)) {
-        consume_type(parser);
-    }
+    TypeSyntax* first_type = ParseOptionalDeclarationType(parser);
 
     if (!match(parser, TOKEN_IDENTIFIER)) {
         parser->had_error = 1;
-        printf("Parse error: Expected foreach variable on line %d\n", parser->lexer.line);
+        printf("Parse error: Expected foreach variable on line %zu\n", parser->lexer.line);
         return NULL;
     }
 
@@ -463,19 +925,21 @@ static ASTNode* ParseForeach(Parser* parser) {
     int first_len = parser->previous.length;
     const char* index_name = NULL;
     int index_len = 0;
+    TypeSyntax* index_type = NULL;
     const char* var_name = first_name;
     int var_len = first_len;
+    TypeSyntax* variable_type = first_type;
 
     if (match(parser, TOKEN_COMMA)) {
         index_name = first_name;
         index_len = first_len;
+        index_type = first_type;
+        variable_type = NULL;
 
-        if (is_type_token(parser->current.type)) {
-            consume_type(parser);
-        }
+        variable_type = ParseOptionalDeclarationType(parser);
         if (!match(parser, TOKEN_IDENTIFIER)) {
             parser->had_error = 1;
-            printf("Parse error: Expected foreach value variable on line %d\n", parser->lexer.line);
+            printf("Parse error: Expected foreach value variable on line %zu\n", parser->lexer.line);
             return NULL;
         }
         var_name = parser->previous.start;
@@ -487,7 +951,8 @@ static ASTNode* ParseForeach(Parser* parser) {
     match(parser, TOKEN_RPAREN); // Consume ')'
 
     ASTNode* body = ParseBlock(parser);
-    return ASTNewForeach(var_name, var_len, index_name, index_len, array_expr, body);
+    return ASTNewForeach(variable_type, var_name, var_len, index_type,
+                         index_name, index_len, array_expr, body);
 }
 
 /* A loop or conditional body. With braces it is a statement list; without
@@ -505,7 +970,7 @@ static ASTNode* ParseBlock(Parser* parser) {
         ASTNode* stmt = ParseStatement(parser);
         if (stmt == NULL) {
             parser->had_error = 1;
-            printf("Parse error: Expected a statement or '{' on line %d\n",
+            printf("Parse error: Expected a statement or '{' on line %zu\n",
                    parser->lexer.line);
             return ASTNewBlock(NULL, 0);
         }
@@ -535,8 +1000,9 @@ static ASTNode* ParseBlock(Parser* parser) {
             }
         } else {
             parser->had_error = 1;
-            printf("Parse error: Unexpected token '%.*s' on line %d\n",
-                   parser->current.length, parser->current.start, parser->lexer.line);
+            printf("Parse error: Unexpected token '%.*s' on line %zu\n",
+                   (int)parser->current.length, parser->current.start,
+                   parser->lexer.line);
             advance(parser);
         }
         skip_terminators(parser); // NEW: Skip newlines between statements in block
@@ -544,54 +1010,25 @@ static ASTNode* ParseBlock(Parser* parser) {
 
     if (!match(parser, TOKEN_RBRACE)) {
         parser->had_error = 1;
-        printf("Parse error: Expected '}' on line %d\n", parser->lexer.line);
+        printf("Parse error: Expected '}' on line %zu\n", parser->lexer.line);
     }
 
     return ASTNewBlock(stmts, count);
 }
 
-static ASTNode* ParseFuncDecl(Parser* parser, Token name) {
-    advance(parser); // Consume '('
-
-    const char** param_names = NULL;
-    int* param_lens = NULL;
-    int param_count = 0;
-
-    if (!check(parser, TOKEN_RPAREN)) {
-        param_names = (const char**)malloc(sizeof(char*) * 8);
-        param_lens = (int*)malloc(sizeof(int) * 8);
-
-        do {
-            if (check(parser, TOKEN_DOTDOTDOT)) {
-                parser->had_error = 1;
-                printf("Parse error: variadic parameters are not implemented on line %d\n",
-                       parser->lexer.line);
-                break;
-            }
-            if (!is_type_token(parser->current.type)) {
-                parser->had_error = 1;
-                printf("Parse error: Expected parameter type on line %d\n", parser->lexer.line);
-                break;
-            }
-            consume_type(parser);
-
-            if (!match(parser, TOKEN_IDENTIFIER)) {
-                parser->had_error = 1;
-                printf("Parse error: Expected parameter name on line %d\n", parser->lexer.line);
-                break;
-            }
-
-            param_names[param_count] = parser->previous.start;
-            param_lens[param_count] = parser->previous.length;
-            param_count++;
-        } while (match(parser, TOKEN_COMMA));
+static ASTNode* ParseFuncDecl(Parser* parser, TypeSyntax* return_type,
+                              Token name) {
+    ParameterSyntax* parameters = NULL;
+    int parameter_count = 0;
+    advance(parser); /* opening '(' */
+    if (!ParseParameterList(parser, 1, &parameters, &parameter_count)) {
+        return NULL;
     }
-
-    match(parser, TOKEN_RPAREN); // Consume ')'
     skip_terminators(parser);    // Allow newline before '{'
 
     ASTNode* body = ParseBlock(parser);
-    return ASTNewFuncDecl(name.start, name.length, param_names, param_lens, param_count, body);
+    return ASTNewFuncDecl(return_type, name.start, name.length, parameters,
+                          parameter_count, body);
 }
 
 static ASTNode* ParseIgnoredDirective(Parser* parser) {
@@ -611,8 +1048,8 @@ static ASTNode* ParseStatement(Parser* parser) {
         return ParseIgnoredDirective(parser);
     }
 
-    if (is_type_token(parser->current.type)) {
-        Token type_token = consume_type(parser);
+    TypeSyntax* declared_type = ParseOptionalDeclarationType(parser);
+    if (declared_type != NULL) {
 
         if (check(parser, TOKEN_IDENTIFIER)) {
             Token name_token = parser->current;
@@ -620,15 +1057,15 @@ static ASTNode* ParseStatement(Parser* parser) {
 
             // If next token is '(', it's a function!
             if (check(parser, TOKEN_LPAREN)) {
-                return ParseFuncDecl(parser, name_token);
+                return ParseFuncDecl(parser, declared_type, name_token);
             }
 
             // Otherwise, it's a variable declaration
-            return ParseVarDecl(parser, type_token.type, name_token);
+            return ParseVarDecl(parser, declared_type, name_token);
         }
 
         parser->had_error = 1;
-        printf("Parse error: Expected identifier after type on line %d\n", parser->lexer.line);
+        printf("Parse error: Expected identifier after type on line %zu\n", parser->lexer.line);
         return NULL;
     }
 
@@ -678,8 +1115,9 @@ ASTNode* ParseProgram(Parser* parser) {
             }
         } else {
             parser->had_error = 1;
-            printf("Parse error: Unexpected token '%.*s' on line %d\n",
-                   parser->current.length, parser->current.start, parser->lexer.line);
+            printf("Parse error: Unexpected token '%.*s' on line %zu\n",
+                   (int)parser->current.length, parser->current.start,
+                   parser->lexer.line);
             advance(parser);
         }
         skip_terminators(parser); // Skip blank lines between statements

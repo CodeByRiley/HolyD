@@ -1,0 +1,90 @@
+/* recursion.hd , functions that call themselves, and the cost of it.
+ *
+ *     holyd tests/recursion.hd
+ *
+ * Functions may be called before the line that declares them: the compiler
+ * collects every declaration before it compiles the top level, so ordering
+ * inside a file never matters. Mutual recursion works for the same reason.
+ */
+
+I64 Factorial(I64 n) {
+    if (n <= 1) {
+        return 1;
+    }
+    return n * Factorial(n - 1);
+}
+
+/* The naive definition, which recomputes its way through the tree. Fib(20)
+ * is about 13,500 calls , fine here, and a useful thing to feel before
+ * reaching for the loop below. */
+I64 Fib(I64 n) {
+    if (n < 2) {
+        return n;
+    }
+    return Fib(n - 1) + Fib(n - 2);
+}
+
+/* The same sequence, iteratively. Linear, and what to write when n grows. */
+I64 FibFast(I64 n) {
+    I64 a = 0;
+    I64 b = 1;
+    for (I64 i = 0; i < n; i++) {
+        I64 next = a + b;
+        a = b;
+        b = next;
+    }
+    return a;
+}
+
+I64 Gcd(I64 a, I64 b) {
+    if (b == 0) {
+        return a;
+    }
+    return Gcd(b, a - (a / b) * b);
+}
+
+/* Mutual recursion. Neither is declared before the other; both resolve. */
+I64 IsEven(I64 n) {
+    if (n == 0) {
+        return 1;
+    }
+    return IsOdd(n - 1);
+}
+
+I64 IsOdd(I64 n) {
+    if (n == 0) {
+        return 0;
+    }
+    return IsEven(n - 1);
+}
+
+U0 main() {
+    PrintLn("factorials:");
+    for (I64 i = 1; i <= 10; i++) {
+        PrintLn("  ", i, "! = ", Factorial(i));
+    }
+
+    PrintLn("");
+    PrintLn("fibonacci, both ways:");
+    for (I64 n = 0; n <= 15; n++) {
+        I64 slow = Fib(n);
+        I64 fast = FibFast(n);
+        if (slow == fast) {
+            PrintLn("  fib(", n, ") = ", slow);
+        } else {
+            PrintLn("  fib(", n, ") DISAGREES: ", slow, " vs ", fast);
+        }
+    }
+
+    PrintLn("");
+    PrintLn("gcd:");
+    PrintLn("  gcd(48, 18) = ", Gcd(48, 18));
+    PrintLn("  gcd(17, 5)  = ", Gcd(17, 5));
+    PrintLn("  gcd(270, 0) = ", Gcd(270, 0));
+
+    PrintLn("");
+    PrintLn("mutual recursion:");
+    foreach (n; [0, 1, 7, 10]) {
+        PrintLn("  ", n, " even? ", IsEven(n), "  odd? ", IsOdd(n));
+    }
+}

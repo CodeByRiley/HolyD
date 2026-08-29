@@ -4,6 +4,7 @@
  */
 
 #include "compiler.h"
+#include "emit_c.h"
 #include "eval.h"
 #include "ffi.h"
 #include "parser/parser.h"
@@ -118,7 +119,7 @@ int check_ext(const char *filename) {
 
 char *read_file(const char *filename) {
   FILE *file =
-      fopen(filename, "rb"); // Use binary mode for accurate byte counts
+      fopen(filename, "rb");
   if (file == NULL) {
     return NULL;
   }
@@ -319,8 +320,10 @@ static void print_usage(void) {
          "Run every .hd file under dir (default "
          HOLYD_DEFAULT_TEST_DIR "/)");
   printf("  %-16s %s\n", "-tokens", "Print the token stream and exit");
+  printf("  %-16s %s\n", "-ast", "Print the parsed AST and exit");
   printf("  %-16s %s\n", "--interpret", "Walk the AST instead of running bytecode");
   printf("  %-16s %s\n", "--dump-bytecode", "Disassemble the program before running it");
+  printf("  %-16s %s\n", "--emit-c [-o]", "Write runnable C source and exit");
   printf("\nNot implemented yet:\n");
   printf("  %-16s %s\n", "-run -S -obj", "need a native code backend");
   printf("  %-16s %s\n", "-lib -clibs -o", "need a native code backend");
@@ -333,8 +336,8 @@ static void print_usage(void) {
 // Why a documented flag still cannot run. NULL means we do not know the flag
 // at all, which is a different message.
 static const char *unimplemented_reason(const char *arg) {
-  static const char *needs_backend[] = {"-run", "-S",     "-obj",
-                                        "-lib", "-clibs", "-o"};
+  static const char *needs_backend[] = {"-run", "-S", "-obj", "-lib",
+                                        "-clibs"};
   for (unsigned i = 0; i < sizeof(needs_backend) / sizeof(needs_backend[0]); i++) {
     if (strcmp(arg, needs_backend[i]) == 0) {
       return "it needs a native code backend";
@@ -364,13 +367,13 @@ static void dump_tokens(const char *source) {
     // A newline token would otherwise break the one-token-per-line layout,
     // and EOF has no text to show at all.
     if (token.type == TOKEN_NEWLINE) {
-      printf("%4d  %-16s '\\n'\n", lexer.line, TokenTypeToString(token.type));
+      printf("%4zu  %-16s '\\n'\n", lexer.line, TokenTypeToString(token.type));
     } else if (token.type == TOKEN_EOF) {
-      printf("%4d  %-16s\n", lexer.line, TokenTypeToString(token.type));
+      printf("%4zu  %-16s\n", lexer.line, TokenTypeToString(token.type));
       break;
     } else {
-      printf("%4d  %-16s '%.*s'\n", lexer.line, TokenTypeToString(token.type),
-             token.length, token.start);
+      printf("%4zu  %-16s '%.*s'\n", lexer.line, TokenTypeToString(token.type),
+             (int)token.length, token.start);
     }
   }
 }
@@ -379,7 +382,10 @@ int main(int argc, char **argv) {
   int use_interpreter = 0;
   int dump_bytecode = 0;
   int tokens_only = 0;
+  int ast_only = 0;
   int run_tests = 0;
+  int emit_c = 0;
+  const char *output_path = NULL;
   const char *source_path = NULL;
 
   if (argc < 2) {
@@ -408,6 +414,22 @@ int main(int argc, char **argv) {
     }
     if (strcmp(arg, "-tokens") == 0) {
       tokens_only = 1;
+      continue;
+    }
+    if (strcmp(arg, "-ast") == 0) {
+      ast_only = 1;
+      continue;
+    }
+    if (strcmp(arg, "--emit-c") == 0) {
+      emit_c = 1;
+      continue;
+    }
+    if (strcmp(arg, "-o") == 0) {
+      if (i + 1 >= argc) {
+        printf("holyd: -o needs a file name\n");
+        return 1;
+      }
+      output_path = argv[++i];
       continue;
     }
 
@@ -470,6 +492,49 @@ int main(int argc, char **argv) {
     printf("Error: Failed to parse file.\n");
     free(source);
     return 1;
+  }
+
+  if (ast_only) {
+    ASTPrint(program, 0);
+    free(source);
+    return 0;
+  }
+
+  if (emit_c) {
+    /* Default output name is the source with its extension swapped, so
+     * `holyd --emit-c samples/gui.hd` lands at samples/gui.c. */
+    char *derived = NULL;
+    const char *target = output_path;
+    if (target == NULL) {
+      size_t len = strlen(source_path);
+      derived = malloc(len + 3); /* ".hd" -> ".c" never grows, but be safe */
+      if (derived == NULL) {
+        printf("Error: out of memory choosing an output name.\n");
+        free(source);
+        return 1;
+      }
+      memcpy(derived, source_path, len - 2);
+      derived[len - 2] = 'c';
+      derived[len - 1] = '\0';
+      target = derived;
+    }
+
+    FILE *out = fopen(target, "wb");
+    if (out == NULL) {
+      printf("Error: could not open '%s' for writing\n", target);
+      free(derived);
+      free(source);
+      return 1;
+    }
+
+    int ok = HDEmitC(program, out, source_path);
+    fclose(out);
+    if (ok) {
+      printf("holyd: wrote %s\n", target);
+    }
+    free(derived);
+    free(source);
+    return ok ? 0 : 1;
   }
 
   if (use_interpreter) {

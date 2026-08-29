@@ -1,0 +1,118 @@
+/* operators.hd , the expression surface.
+ *
+ *     holyd tests/operators.hd
+ *
+ * Covers the operators added alongside && and ||: arithmetic, bitwise,
+ * shifts, exponentiation, logical negation and every compound assignment.
+ *
+ * The short-circuit section is the one that matters. `a && b` is not the
+ * same as computing both and combining them, so the test has to be able to
+ * see that b was skipped , hence Loud, which prints when it is called.
+ * Checking only the result would pass just as well with eager evaluation.
+ */
+
+I64 Loud(I64 value, I64 tag) {
+    PrintLn("    evaluated ", tag);
+    return value;
+}
+
+U0 main() {
+    PrintLn("arithmetic:");
+    PrintLn("  17 % 5   = ", 17 % 5);
+    PrintLn("  -17 % 5  = ", -17 % 5, "   (truncating, as in C)");
+    PrintLn("  2 ^^ 10  = ", 2 ^^ 10);
+    PrintLn("  2.5 ^^ 2 = ", 2.5 ^^ 2);
+    PrintLn("  2 ^^ 3 ^^ 2 = ", 2 ^^ 3 ^^ 2, "   (right associative)");
+    PrintLn("  -2 ^^ 2  = ", -2 ^^ 2, "   (^^ binds tighter than unary -)");
+
+    PrintLn("");
+    PrintLn("bitwise:");
+    PrintLn("  12 & 10  = ", 12 & 10);
+    PrintLn("  12 | 10  = ", 12 | 10);
+    PrintLn("  12 ^ 10  = ", 12 ^ 10);
+    PrintLn("  1 << 10  = ", 1 << 10);
+    PrintLn("  -16 >> 2 = ", -16 >> 2, "   (arithmetic, sign kept)");
+    PrintLn("  -16 >>> 60 = ", -16 >>> 60, "   (logical, sign not kept)");
+
+    PrintLn("");
+    PrintLn("negation:");
+    PrintLn("  !0    = ", !0);
+    PrintLn("  !1    = ", !1);
+    PrintLn("  !!5   = ", !!5);
+    /* Negation asks truthiness rather than comparing against zero, so it
+     * is defined on strings and arrays, where == would be a type error. */
+    PrintLn("  !(empty string) = ", !"");
+    PrintLn("  !(empty array)  = ", ![]);
+    PrintLn("  !(nonempty)     = ", !"x");
+    PrintLn("  -(3)  = ", -3);
+
+    /* Unary minus binds looser than indexing, so this is -(xs[0]) rather
+     * than (-xs)[0]. */
+    I64[] xs = [7, 8, 9];
+    PrintLn("  -xs[0] = ", -xs[0]);
+
+    PrintLn("");
+    PrintLn("precedence:");
+    PrintLn("  1 + 2 * 3      = ", 1 + 2 * 3);
+    PrintLn("  1 << 2 + 3     = ", 1 << 2 + 3, "   (+ binds tighter)");
+    PrintLn("  1 | 2 ^ 3 & 1  = ", 1 | 2 ^ 3 & 1, "   (& then ^ then |)");
+    PrintLn("  0 == 0 & 1     = ", 0 == 0 & 1, "   (& binds looser than ==)");
+
+    PrintLn("");
+    PrintLn("short-circuit , && stops when the left is false:");
+    PrintLn("  result ", Loud(0, 1) && Loud(1, 2));
+    PrintLn("short-circuit , && runs both when the left is true:");
+    PrintLn("  result ", Loud(1, 1) && Loud(0, 2));
+    PrintLn("short-circuit , || stops when the left is true:");
+    PrintLn("  result ", Loud(1, 1) || Loud(1, 2));
+    PrintLn("short-circuit , || runs both when the left is false:");
+    PrintLn("  result ", Loud(0, 1) || Loud(1, 2));
+
+    PrintLn("");
+    PrintLn("logical results normalise to 0 or 1:");
+    PrintLn("  5 && 7 = ", 5 && 7);
+    PrintLn("  5 || 7 = ", 5 || 7);
+    PrintLn("  0 && 7 = ", 0 && 7);
+
+    PrintLn("");
+    PrintLn("compound assignment:");
+    I64 n = 10;
+    n += 5;   PrintLn("  after += 5   ", n);
+    n -= 3;   PrintLn("  after -= 3   ", n);
+    n *= 4;   PrintLn("  after *= 4   ", n);
+    n /= 6;   PrintLn("  after /= 6   ", n);
+    n %= 5;   PrintLn("  after %= 5   ", n);
+    n ^^= 4;  PrintLn("  after ^^= 4  ", n);
+    n <<= 2;  PrintLn("  after <<= 2  ", n);
+    n >>= 1;  PrintLn("  after >>= 1  ", n);
+    n &= 60;  PrintLn("  after &= 60  ", n);
+    n |= 3;   PrintLn("  after |= 3   ", n);
+    n ^= 5;   PrintLn("  after ^= 5   ", n);
+
+    I64 u = -32;
+    u >>>= 60; PrintLn("  -32 >>>= 60  ", u);
+
+    auto s = "ab";
+    s ~= "cd";
+    PrintLn("  after ~= ", s);
+
+    /* Elements take compound assignment too, desugaring the same way. */
+    I64[] acc = [1, 2, 3];
+    acc[0] += 10;
+    acc[1] *= 5;
+    acc[2] <<= 3;
+    PrintLn("  array ", acc);
+
+    PrintLn("");
+    PrintLn("&& and || in conditions:");
+    I64 a = 5;
+    if (a > 0 && a < 10) {
+        PrintLn("  ", a, " is a single positive digit");
+    }
+    if (a == 0 || a == 5) {
+        PrintLn("  ", a, " matched one of the alternatives");
+    }
+    if (!(a > 10)) {
+        PrintLn("  ", a, " is not greater than ten");
+    }
+}

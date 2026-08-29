@@ -1,0 +1,14 @@
+I64 First(I64[] values) {
+    return values[0];
+}
+
+I64[3] fixed = [10, 20, 30];
+I64[] dynamic = fixed;
+I64* pointer = 7;
+I64 total = 0;
+
+foreach (I64 index, I64 value; dynamic) {
+    total = total + value + index;
+}
+
+Print("first=", First(dynamic), " total=", total, " pointer=", pointer, "\n");

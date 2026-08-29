@@ -2,6 +2,7 @@
 #define HOLYD_EVAL_H
 
 #include "ast/ast.h"
+#include <stddef.h>
 
 typedef enum {
     VAL_INT,

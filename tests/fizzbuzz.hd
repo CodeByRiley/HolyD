@@ -1,0 +1,38 @@
+/* fizzbuzz.hd , else-if chains, and how division truncates.
+ *
+ *     holyd tests/fizzbuzz.hd
+ *
+ * `%` is a remainder, not a modulus: it takes its sign from the left
+ * operand, because integer division truncates toward zero rather than
+ * flooring. So -7 % 3 is -1, where a flooring modulus would give 2. That
+ * matches C and D, and it is the reason the checks below are written
+ * against a positive counter.
+ */
+
+U0 main() {
+    for (I64 i = 1; i <= 20; i++) {
+        /* 15 first: a chain tested in the other order would print Fizz for
+         * every multiple of fifteen and never reach this branch. */
+        if (i % 15 == 0) {
+            PrintLn("FizzBuzz");
+        } else if (i % 3 == 0) {
+            PrintLn("Fizz");
+        } else if (i % 5 == 0) {
+            PrintLn("Buzz");
+        } else {
+            PrintLn(i);
+        }
+    }
+
+    /* Brace-less bodies parse, and read well when the branch is one line. */
+    PrintLn("");
+    for (I64 j = 1; j <= 5; j++)
+        PrintLn(j, " squared is ", j * j);
+
+    /* The sign rule, shown rather than asserted. */
+    PrintLn("");
+    PrintLn("remainder takes the sign of the left operand:");
+    foreach (n; [7, -7]) {
+        PrintLn("  ", n, " / 3 = ", n / 3, "   ", n, " % 3 = ", n % 3);
+    }
+}

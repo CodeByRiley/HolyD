@@ -1,4 +1,4 @@
-/* userspace/lib/gfx.c , 2D drawing over a pixel buffer.
+/* HolyD standalone gfx implementation , 2D drawing over a pixel buffer.
  *
  * Every entry point clips before it writes, so callers can pass negative
  * origins, oversized rectangles or off-surface coordinates without
@@ -10,8 +10,8 @@
  * destination rectangle into the part that survives, plus the offset into
  * the source that corresponds to it.
  */
-#include "gfx.h"
-#include <include/fonts/font8x8.h>
+#include "../gfx.h"
+#include "../font8x8.h"
 
 extern void *memcpy(void *, const void *, size_t);
 

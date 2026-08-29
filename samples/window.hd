@@ -31,30 +31,3 @@ U0 main() {
   PrintLn("gui: done");
   return 0;
 }
-
-//U8 main() {
-//  PrintLn("Creating window...");
-
-//  I64 win = WinCreate(400, 300, "HolyD GUI App!");
-
-//  if (win < 0) {
-//    PrintLn("Failed to create window!");
-//    return -1;
-//  }
-
-//  PrintLn("Window created! Changing title...");
-//  WinSetTitle(win, "Title changed by HolyD!");
-
-  // Tell the window manager to redraw the window frame
-//  WinInvalidate(win);
-
-//  PrintLn("Window is open. Idling...");
-
-  // Keep the process alive so the window stays open
-//  while (true) {
-    // In a real GUI app, we would call WinPollEvent() here
-//  }
-
-//  WinDestroy(win);
-//  return 0;
-//}

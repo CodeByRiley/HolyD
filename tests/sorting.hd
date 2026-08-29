@@ -1,0 +1,94 @@
+/* sorting.hd , arrays in place, and what a function receives.
+ *
+ *     holyd tests/sorting.hd
+ *
+ * The thing worth knowing here: an array passed to a function aliases the
+ * caller's array. An HDValue is copied by value, but the elements it points
+ * at are not, so `xs[i] = v` inside a function is visible outside it. That
+ * is why Sort has no return value and none of the callers rebind anything.
+ *
+ * There is no swap, no break, and no compound assignment, so the inner loop
+ * is written out. It is bubble sort because bubble sort is legible, not
+ * because it is good.
+ */
+
+U0 Swap(I64[] xs, I64 a, I64 b) {
+    I64 held = xs[a];
+    xs[a] = xs[b];
+    xs[b] = held;
+}
+
+U0 Sort(I64[] xs) {
+    I64 n = xs.length;
+
+    /* Each pass settles one more element at the top, so the inner bound
+     * shrinks. `pass` counts how many are already in place. */
+    for (I64 pass = 0; pass < n; pass++) {
+        for (I64 i = 0; i < n - 1 - pass; i++) {
+            if (xs[i] > xs[i + 1]) {
+                Swap(xs, i, i + 1);
+            }
+        }
+    }
+}
+
+/* Binary search over the sorted array. No break, so `low > high` is left
+ * to the loop condition and a hit sets both bounds to end it. */
+I64 IndexOf(I64[] xs, I64 target) {
+    I64 low = 0;
+    I64 high = xs.length - 1;
+    I64 at = 0 - 1;
+
+    while (low <= high) {
+        I64 mid = (low + high) / 2;
+        if (xs[mid] == target) {
+            at = mid;
+            low = high + 1;
+        } else if (xs[mid] < target) {
+            low = mid + 1;
+        } else {
+            high = mid - 1;
+        }
+    }
+
+    return at;
+}
+
+I64 Sum(I64[] xs) {
+    I64 total = 0;
+    foreach (v; xs) {
+        total = total + v;
+    }
+    return total;
+}
+
+U0 main() {
+    I64[] values = [42, 8, 15, 4, 23, 16];
+
+    PrintLn("before: ", values);
+    Sort(values);
+    PrintLn("after:  ", values);
+
+    /* Sort mutated the caller's array, so the original name is sorted. */
+    PrintLn("sum:    ", Sum(values));
+    PrintLn("min:    ", values[0]);
+    PrintLn("max:    ", values[values.length - 1]);
+
+    PrintLn("");
+    foreach (target; [4, 16, 99]) {
+        I64 at = IndexOf(values, target);
+        if (at < 0) {
+            PrintLn("search ", target, ": absent");
+        } else {
+            PrintLn("search ", target, ": index ", at);
+        }
+    }
+
+    /* ~ joins arrays as well as strings, and builds a new one rather than
+     * extending either side. */
+    PrintLn("");
+    I64[] more = values ~ [100, 1];
+    Sort(more);
+    PrintLn("joined: ", more);
+    PrintLn("origin: ", values, "  (unchanged , ~ copies)");
+}

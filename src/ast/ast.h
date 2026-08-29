@@ -2,9 +2,7 @@
 #define HOLYD_AST_H
 
 #include "../lexer/lexer.h"
-
-// Forward declarations
-typedef struct ASTNode ASTNode;
+#include "type_syntax.h"
 
 // All the different kinds of AST nodes
 typedef enum {
@@ -16,6 +14,7 @@ typedef enum {
     AST_ASSIGN,         // x = expr;
     AST_INDEX_ASSIGN,   // arr[index] = expr;
     AST_BINARY_OP,      // expr + expr
+    AST_UNARY_OP,       // !expr, -expr
     AST_CALL,           // Print(expr)
     AST_INDEX,          // array[index]
     AST_ARRAY_LEN_EXPR, // array.length
@@ -28,68 +27,140 @@ typedef enum {
     AST_RETURN,				  // return expr
 } ASTNodeType;
 
-struct ASTNode {
-    ASTNodeType type;
+typedef struct {
+    long long value;
+} ASTIntegerLiteral;
 
-    // For AST_NUMBER
-    long long number_val;
+typedef struct {
+    double value;
+} ASTFloatLiteral;
 
-    // For AST_FLOAT
-    double float_val;
+typedef struct {
+    const char* value;
+    int length;
+} ASTStringLiteral;
 
-    // For AST_STRING
-    const char* string_val;
-    int string_len;
+typedef struct {
+    TypeSyntax* declared_type;
+    const char* name;
+    int name_length;
+    ASTNode* initializer;
+} ASTVariableDecl;
 
-    // For AST_VAR_DECL, AST_VAR_REF
-    const char* var_name;
-    int var_name_len;
-    TokenType var_type; // TOKEN_I64, TOKEN_U0, TOKEN_AUTO, etc.
-    ASTNode* initializer; // For AST_VAR_DECL
+typedef struct {
+    const char* name;
+    int name_length;
+} ASTVariableRef;
 
-    // For AST_ASSIGN
-    ASTNode* assign_target;
+typedef struct {
+    const char* name;
+    int name_length;
+    ASTNode* value;
+} ASTAssignment;
 
-    // For AST_BINARY_OP
-    TokenType op;
+typedef struct {
+    ASTNode* target;
+    ASTNode* index;
+    ASTNode* value;
+} ASTIndexAssignment;
+
+typedef struct {
+    TokenType operator_type;
     ASTNode* left;
     ASTNode* right;
+} ASTBinaryOp;
 
-    // For AST_INDEX / AST_ARRAY_LEN_EXPR
-    ASTNode* index_target;
-    ASTNode* index_expr;
+typedef struct {
+    TokenType operator_type;
+    ASTNode* operand;
+} ASTUnaryOp;
 
-    // For AST_CALL
+typedef struct {
+    ASTNode* target;
+    ASTNode* index;
+} ASTIndexExpr;
+
+typedef struct {
+    ASTNode* target;
+} ASTArrayLengthExpr;
+
+typedef struct {
     const char* callee_name;
-    int callee_len;
-    ASTNode** args;         // Array of argument expressions
-    int arg_count;
+    int callee_name_length;
+    ASTNode** arguments;
+    int argument_count;
+} ASTCall;
 
-    // For AST_BLOCK, AST_IF, AST_FOREACH
-    ASTNode** statements;   // Array of statements in the block
-    int stmt_count;
+typedef struct {
+    ASTNode** statements;
+    int statement_count;
+} ASTBlock;
 
-    // For AST_IF
+typedef struct {
     ASTNode* condition;
-    ASTNode* then_block;
-    ASTNode* else_block;
+    ASTNode* then_branch;
+    ASTNode* else_branch;
+} ASTIfStatement;
 
-    // For AST_FOR
-    ASTNode* init_stmt;
+typedef struct {
+    ASTNode* condition;
+    ASTNode* body;
+} ASTWhileStatement;
+
+typedef struct {
+    ASTNode* initializer;
+    ASTNode* condition;
     ASTNode* increment;
+    ASTNode* body;
+} ASTForStatement;
 
-    // For AST_FOREACH
-    ASTNode* array_expr;
+typedef struct {
+    TypeSyntax* variable_type;
+    const char* variable_name;
+    int variable_name_length;
+    TypeSyntax* index_type;
     const char* index_name;
-    int index_name_len;
+    int index_name_length;
+    ASTNode* array_expression;
+    ASTNode* body;
+} ASTForeachStatement;
 
-    // For AST_FUNC_DECL
-    const char** param_names;
-    int* param_name_lens;
-    int param_count;
+typedef struct {
+    TypeSyntax* return_type;
+    const char* name;
+    int name_length;
+    ParameterSyntax* parameters;
+    int parameter_count;
+    ASTNode* body;
+} ASTFunctionDecl;
 
-    // For AST_RETURN
-    ASTNode* return_expr;
+typedef struct {
+    ASTNode* expression;
+} ASTReturnStatement;
+
+struct ASTNode {
+    ASTNodeType type;
+    union {
+        ASTIntegerLiteral integer_literal;
+        ASTFloatLiteral float_literal;
+        ASTStringLiteral string_literal;
+        ASTVariableDecl variable_decl;
+        ASTVariableRef variable_ref;
+        ASTAssignment assignment;
+        ASTIndexAssignment index_assignment;
+        ASTBinaryOp binary_op;
+        ASTUnaryOp unary_op;
+        ASTIndexExpr index_expr;
+        ASTArrayLengthExpr array_length_expr;
+        ASTCall call;
+        ASTBlock block;
+        ASTIfStatement if_statement;
+        ASTWhileStatement while_statement;
+        ASTForStatement for_statement;
+        ASTForeachStatement foreach_statement;
+        ASTFunctionDecl function_decl;
+        ASTReturnStatement return_statement;
+    } as;
 };
 
 // Helper functions to create nodes (allocates memory)
@@ -97,9 +168,10 @@ ASTNode* ASTNewNumber(long long val);
 ASTNode* ASTNewFloat(double val);
 ASTNode* ASTNewString(const char* str, int len);
 ASTNode* ASTNewVarRef(const char* name, int len);
-ASTNode* ASTNewVarDecl(TokenType type, const char* name, int len, ASTNode* init);
+ASTNode* ASTNewVarDecl(TypeSyntax* type, const char* name, int len, ASTNode* init);
 ASTNode* ASTNewAssign(const char* name, int len, ASTNode* value);
 ASTNode* ASTNewBinaryOp(TokenType op, ASTNode* left, ASTNode* right);
+ASTNode* ASTNewUnaryOp(TokenType op, ASTNode* operand);
 ASTNode* ASTNewIndex(ASTNode* target, ASTNode* index);
 ASTNode* ASTNewIndexAssign(ASTNode* target, ASTNode* index, ASTNode* value);
 ASTNode* ASTNewArrayLenExpr(ASTNode* target);
@@ -108,8 +180,16 @@ ASTNode* ASTNewBlock(ASTNode** stmts, int count);
 ASTNode* ASTNewIf(ASTNode* cond, ASTNode* then_block, ASTNode* else_block);
 ASTNode* ASTNewWhile(ASTNode* cond, ASTNode* body);
 ASTNode* ASTNewFor(ASTNode* init, ASTNode* cond, ASTNode* inc, ASTNode* body);
-ASTNode* ASTNewForeach(const char* var_name, int var_len, const char* index_name, int index_len, ASTNode* array_expr, ASTNode* body);
-ASTNode* ASTNewFuncDecl(const char* name, int len, const char** params, int* param_lens, int param_count, ASTNode* body);
+ASTNode* ASTNewForeach(TypeSyntax* variable_type, const char* var_name,
+                       int var_len, TypeSyntax* index_type,
+                       const char* index_name, int index_len,
+                       ASTNode* array_expr, ASTNode* body);
+ASTNode* ASTNewFuncDecl(TypeSyntax* return_type, const char* name, int len,
+                        ParameterSyntax* parameters, int parameter_count,
+                        ASTNode* body);
 ASTNode* ASTNewReturn(ASTNode* expr);
+
+/* Recursively print a parsed tree for front-end diagnostics. */
+void ASTPrint(const ASTNode* node, int indent);
 
 #endif

@@ -1,4 +1,4 @@
-/* userspace/lib/bmp.h , minimal BMP decoder.
+/* HolyD standalone BMP API , minimal BMP decoder.
  *
  * Decodes uncompressed 24- and 32-bit Windows BMPs into a top-down buffer
  * of 0xAARRGGBB pixels, which is the framebuffer's own layout plus an

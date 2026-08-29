@@ -76,35 +76,38 @@ static HDValue EvalExpression(ASTNode* node, Environment* env) {
     switch (node->type) {
         case AST_NUMBER:
             val.type = VAL_INT;
-            val.i64 = node->number_val;
+            val.i64 = node->as.integer_literal.value;
             break;
 
         case AST_FLOAT:
             val.type = VAL_FLOAT;
-            val.f64 = node->float_val;
+            val.f64 = node->as.float_literal.value;
             break;
 
         case AST_STRING:
             val.type = VAL_STRING;
-            val.str = node->string_val;
-            val.str_len = node->string_len;
+            val.str = node->as.string_literal.value;
+            val.str_len = node->as.string_literal.length;
             break;
 
         case AST_VAR_REF: {
-            HDValue* var = EnvGet(env, node->var_name, node->var_name_len);
+            HDValue* var = EnvGet(env, node->as.variable_ref.name,
+                                  node->as.variable_ref.name_length);
             if (var != NULL) {
                 return *var;
             }
-            printf("Error: Undefined variable '%.*s'\n", node->var_name_len, node->var_name);
+            printf("Error: Undefined variable '%.*s'\n",
+                   node->as.variable_ref.name_length,
+                   node->as.variable_ref.name);
             break;
         }
 
         case AST_BINARY_OP: {
-            HDValue left = EvalExpression(node->left, env);
-            HDValue right = EvalExpression(node->right, env);
+            HDValue left = EvalExpression(node->as.binary_op.left, env);
+            HDValue right = EvalExpression(node->as.binary_op.right, env);
 
             // D-style string concatenation with ~
-            if (node->op == TOKEN_TILDE) {
+            if (node->as.binary_op.operator_type == TOKEN_TILDE) {
                 // Simple concatenation for demo purposes
                 int new_len = left.str_len + right.str_len;
                 char* new_str = (char*)malloc(new_len + 1);
@@ -122,7 +125,7 @@ static HDValue EvalExpression(ASTNode* node, Environment* env) {
                 double a = left.type == VAL_FLOAT ? left.f64 : (double)left.i64;
                 double b = right.type == VAL_FLOAT ? right.f64 : (double)right.i64;
                 val.type = VAL_FLOAT;
-                switch (node->op) {
+                switch (node->as.binary_op.operator_type) {
                     case TOKEN_PLUS:  val.f64 = a + b; break;
                     case TOKEN_MINUS: val.f64 = a - b; break;
                     case TOKEN_STAR:  val.f64 = a * b; break;
@@ -140,7 +143,7 @@ static HDValue EvalExpression(ASTNode* node, Environment* env) {
 
             // Integer math
             val.type = VAL_INT;
-            switch (node->op) {
+            switch (node->as.binary_op.operator_type) {
                 case TOKEN_PLUS:  val.i64 = left.i64 + right.i64; break;
                 case TOKEN_MINUS: val.i64 = left.i64 - right.i64; break;
                 case TOKEN_STAR:  val.i64 = left.i64 * right.i64; break;
@@ -158,14 +161,17 @@ static HDValue EvalExpression(ASTNode* node, Environment* env) {
 
         case AST_CALL: {
             /* Array literals use a synthetic call node. */
-            if (node->callee_len == 7 && strncmp(node->callee_name, "[array]", 7) == 0) {
+            if (node->as.call.callee_name_length == 7 &&
+                strncmp(node->as.call.callee_name, "[array]", 7) == 0) {
                 HDValue val;
                 val.type = VAL_ARRAY;
-                val.array_len = node->arg_count;
-                val.elements = (HDValue*)malloc(sizeof(HDValue) * node->arg_count);
+                val.array_len = node->as.call.argument_count;
+                val.elements = (HDValue*)malloc(
+                    sizeof(HDValue) * node->as.call.argument_count);
 
-                for (int i = 0; i < node->arg_count; i++) {
-                    val.elements[i] = EvalExpression(node->args[i], env);
+                for (int i = 0; i < node->as.call.argument_count; i++) {
+                    val.elements[i] = EvalExpression(
+                        node->as.call.arguments[i], env);
                 }
                 return val;
             }
@@ -188,44 +194,47 @@ HDValue EvalNode(ASTNode* node, Environment* env) {
 
     switch (node->type) {
         case AST_VAR_DECL: {
-            if (node->initializer != NULL) {
-                val = EvalExpression(node->initializer, env);
+            if (node->as.variable_decl.initializer != NULL) {
+                val = EvalExpression(node->as.variable_decl.initializer, env);
             } else {
                 val.type = VAL_INT;
                 val.i64 = 0;
             }
-            EnvSet(env, node->var_name, node->var_name_len, val);
+            EnvSet(env, node->as.variable_decl.name,
+                   node->as.variable_decl.name_length, val);
             break;
         }
 
         case AST_ASSIGN: {
             // Evaluate right side
-            val = EvalExpression(node->initializer, env);
+            val = EvalExpression(node->as.assignment.value, env);
             // Assign to existing variable
-            EnvSet(env, node->var_name, node->var_name_len, val);
+            EnvSet(env, node->as.assignment.name,
+                   node->as.assignment.name_length, val);
             break;
         }
 
         case AST_BLOCK: {
-            for (int i = 0; i < node->stmt_count; i++) {
-                EvalNode(node->statements[i], env);
+            for (int i = 0; i < node->as.block.statement_count; i++) {
+                EvalNode(node->as.block.statements[i], env);
             }
             break;
         }
 
         case AST_IF: {
-            HDValue cond = EvalExpression(node->condition, env);
+            HDValue cond = EvalExpression(node->as.if_statement.condition, env);
             if (cond.i64 != 0) {
-                EvalNode(node->then_block, env);
-            } else if (node->else_block != NULL) {
-                EvalNode(node->else_block, env);
+                EvalNode(node->as.if_statement.then_branch, env);
+            } else if (node->as.if_statement.else_branch != NULL) {
+                EvalNode(node->as.if_statement.else_branch, env);
             }
             break;
         }
 
         case AST_FOREACH: {
             // Evaluate the array we are looping over
-            HDValue array = EvalExpression(node->array_expr, env);
+            HDValue array = EvalExpression(
+                node->as.foreach_statement.array_expression, env);
 
             if (array.type != VAL_ARRAY) {
                 printf("Error: foreach expects an array.\n");
@@ -233,19 +242,23 @@ HDValue EvalNode(ASTNode* node, Environment* env) {
             }
 
             for (int i = 0; i < array.array_len; i++) {
-                EnvSet(env, node->var_name, node->var_name_len, array.elements[i]);
+                EnvSet(env, node->as.foreach_statement.variable_name,
+                       node->as.foreach_statement.variable_name_length,
+                       array.elements[i]);
 
                 // Execute the body of the loop
-                EvalNode(node->then_block, env); // then_block is reused as the loop body
+                EvalNode(node->as.foreach_statement.body, env);
             }
             break;
         }
 
         case AST_CALL: {
             // Built-in Print function
-            if (node->callee_len == 5 && strncmp(node->callee_name, "Print", 5) == 0) {
-                for (int i = 0; i < node->arg_count; i++) {
-                    HDValue arg = EvalExpression(node->args[i], env);
+            if (node->as.call.callee_name_length == 5 &&
+                strncmp(node->as.call.callee_name, "Print", 5) == 0) {
+                for (int i = 0; i < node->as.call.argument_count; i++) {
+                    HDValue arg = EvalExpression(
+                        node->as.call.arguments[i], env);
                     if (arg.type == VAL_STRING) {
                         // Process escape sequences like \n
                         for (int j = 0; j < arg.str_len; j++) {
@@ -277,33 +290,38 @@ HDValue EvalNode(ASTNode* node, Environment* env) {
                     }
                 }
             } else {
-                printf("Error: Unknown function '%.*s'\n", node->callee_len, node->callee_name);
+                printf("Error: Unknown function '%.*s'\n",
+                       node->as.call.callee_name_length,
+                       node->as.call.callee_name);
             }
             break;
         }
 
         case AST_INDEX_ASSIGN: {
-            if (node->index_target == NULL ||
-                node->index_target->type != AST_VAR_REF) {
+            if (node->as.index_assignment.target == NULL ||
+                node->as.index_assignment.target->type != AST_VAR_REF) {
                 printf("Error: indexed assignment needs a named array.\n");
                 break;
             }
 
-            HDValue* array = EnvGet(env, node->index_target->var_name,
-                                    (size_t)node->index_target->var_name_len);
+            ASTNode* target = node->as.index_assignment.target;
+            HDValue* array = EnvGet(
+                env, target->as.variable_ref.name,
+                (size_t)target->as.variable_ref.name_length);
             if (array == NULL || array->type != VAL_ARRAY) {
                 printf("Error: indexed assignment target is not an array.\n");
                 break;
             }
 
-            HDValue index = EvalExpression(node->index_expr, env);
+            HDValue index = EvalExpression(node->as.index_assignment.index, env);
             if (index.type != VAL_INT || index.i64 < 0 ||
                 index.i64 >= array->array_len) {
                 printf("Error: array index out of range.\n");
                 break;
             }
 
-            array->elements[index.i64] = EvalExpression(node->initializer, env);
+            array->elements[index.i64] = EvalExpression(
+                node->as.index_assignment.value, env);
             break;
         }
 

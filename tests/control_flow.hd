@@ -1,0 +1,85 @@
+/* control_flow.hd , what to write where a statement is still missing.
+ *
+ *     holyd tests/control_flow.hd
+ *
+ * The operators this file used to work around , &&, ||, !, % and the
+ * compound assignments , exist now; tests/operators.hd covers them. What is
+ * still missing is statement-level: break, continue, do/while and switch
+ * (docs/roadmap.md section 4). Those have shapes that read fine, and this
+ * is where they are written down.
+ */
+
+U0 main() {
+    I64[] haystack = [4, 8, 15, 16, 23, 42];
+
+    /* No break , carry the exit in the loop condition. Setting the index
+     * past the end is what ends the search, and `at` doubles as the
+     * result, so nothing is computed twice. */
+    PrintLn("break:");
+    I64 needle = 16;
+    I64 at = -1;
+    I64 i = 0;
+    while (i < haystack.length) {
+        if (haystack[i] == needle) {
+            at = i;
+            i = haystack.length;      /* ends the loop */
+        } else {
+            i++;
+        }
+    }
+    PrintLn("  found ", needle, " at index ", at);
+
+    /* No continue , invert the guard and put the body inside it. A
+     * `continue` is only ever an if wrapped around the rest of the loop. */
+    PrintLn("");
+    PrintLn("continue:");
+    for (I64 j = 1; j <= 10; j++) {
+        if (j % 2 == 0) {
+            PrintLn("  even: ", j);
+        }
+    }
+
+    /* No do/while , run the body once before the loop, or use a flag that
+     * starts out true. The second reads better when the body is long. */
+    PrintLn("");
+    PrintLn("do/while:");
+    I64 countdown = 3;
+    I64 first = 1;
+    while (first == 1 || countdown > 0) {
+        first = 0;
+        PrintLn("  tick ", countdown);
+        countdown--;
+    }
+
+    /* No switch , an else-if chain. Worth ordering the cases the way a
+     * switch would fall through: most specific first. */
+    PrintLn("");
+    PrintLn("switch:");
+    foreach (n; [1, 2, 3, 99]) {
+        if (n == 1) {
+            PrintLn("  ", n, " one");
+        } else if (n == 2) {
+            PrintLn("  ", n, " two");
+        } else if (n == 3) {
+            PrintLn("  ", n, " three");
+        } else {
+            PrintLn("  ", n, " something else");
+        }
+    }
+
+    /* foreach has an indexed form, which saves keeping a counter in step
+     * with the loop by hand. */
+    PrintLn("");
+    PrintLn("indexed foreach:");
+    foreach (idx, value; haystack) {
+        PrintLn("  [", idx, "] = ", value);
+    }
+
+    /* Accumulating over an array, now that += exists. */
+    PrintLn("");
+    I64 total = 0;
+    foreach (n; haystack) {
+        total += n;
+    }
+    PrintLn("sum = ", total);
+}

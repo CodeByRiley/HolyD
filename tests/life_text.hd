@@ -1,0 +1,192 @@
+/* life_text.hd , Conway's Life with no window.
+ *
+ *     holyd tests/life_text.hd
+ *
+ * samples/life.hd is the same rules drawn with the windowing FFI. This one
+ * prints to stdout, runs a fixed number of generations and stops, so it can
+ * live in tests/ and be checked by tools/difftest.sh.
+ *
+ * It is also the check that the rules are right: a blinker must return to
+ * its starting shape every two generations, and a glider must come back to
+ * its starting shape after four, displaced by one cell diagonally. Both are
+ * asserted below by comparing populations and cell positions, so a wrong
+ * neighbour count shows up as a failed line rather than as a picture that
+ * looks vaguely wrong.
+ */
+
+I64 W = 8;
+I64 H = 8;
+
+I64 Mod(I64 n, I64 d) {
+    return n - (n / d) * d;
+}
+
+I64[] MakeGrid(I64 power) {
+    I64[] g = [0];
+    for (I64 i = 0; i < power; i++) {
+        g = g ~ g;
+    }
+    return g;
+}
+
+I64 At(I64[] g, I64 x, I64 y) {
+    return g[y * W + x];
+}
+
+U0 Set(I64[] g, I64 x, I64 y, I64 v) {
+    g[y * W + x] = v;
+}
+
+U0 Clear(I64[] g) {
+    for (I64 i = 0; i < g.length; i++) {
+        g[i] = 0;
+    }
+}
+
+U0 Copy(I64[] from, I64[] into) {
+    for (I64 i = 0; i < from.length; i++) {
+        into[i] = from[i];
+    }
+}
+
+/* Sums all nine cells and takes the centre back off, which avoids needing
+ * `dx != 0 && dy != 0` to skip it. Wraps at the edges. */
+I64 Neighbours(I64[] g, I64 x, I64 y) {
+    I64 n = 0;
+    for (I64 dy = 0 - 1; dy <= 1; dy++) {
+        for (I64 dx = 0 - 1; dx <= 1; dx++) {
+            n = n + At(g, Mod(x + dx + W, W), Mod(y + dy + H, H));
+        }
+    }
+    return n - At(g, x, y);
+}
+
+/* B3/S23. */
+U0 Step(I64[] cur, I64[] nxt) {
+    for (I64 y = 0; y < H; y++) {
+        for (I64 x = 0; x < W; x++) {
+            I64 n = Neighbours(cur, x, y);
+            I64 next = 0;
+            if (At(cur, x, y) == 1) {
+                if (n == 2) next = 1;
+                if (n == 3) next = 1;
+            } else {
+                if (n == 3) next = 1;
+            }
+            Set(nxt, x, y, next);
+        }
+    }
+}
+
+U0 Show(I64[] g, I64 gen) {
+    PrintLn("gen ", gen, ":");
+    for (I64 y = 0; y < H; y++) {
+        auto row = "  ";
+        for (I64 x = 0; x < W; x++) {
+            if (At(g, x, y) == 1) {
+                row = row ~ "#";
+            } else {
+                row = row ~ ".";
+            }
+        }
+        PrintLn(row);
+    }
+}
+
+I64 Population(I64[] g) {
+    I64 n = 0;
+    foreach (v; g) {
+        n = n + v;
+    }
+    return n;
+}
+
+/* Cheap fingerprint of a grid: every live cell contributes its index, so
+ * two grids with the same shape in the same place agree. */
+I64 Fingerprint(I64[] g) {
+    I64 h = 0;
+    foreach (i, v; g) {
+        if (v == 1) {
+            h = h + i * i + 7;
+        }
+    }
+    return h;
+}
+
+/* `from` is the generation already reached, so successive calls number
+ * their output continuously instead of both starting at 1. */
+U0 Run(I64[] cur, I64[] nxt, I64 from, I64 generations, I64 show) {
+    for (I64 i = 0; i < generations; i++) {
+        Step(cur, nxt);
+        Copy(nxt, cur);
+        if (show == 1) {
+            Show(cur, from + i + 1);
+        }
+    }
+}
+
+U0 main() {
+    I64[] cur = MakeGrid(6);      /* 8 * 8 is 64, which is 2^6 */
+    I64[] nxt = MakeGrid(6);
+
+    /* A blinker: three in a row, which flips between horizontal and
+     * vertical every generation. */
+    PrintLn("--- blinker ---");
+    Clear(cur);
+    Set(cur, 2, 3, 1);
+    Set(cur, 3, 3, 1);
+    Set(cur, 4, 3, 1);
+
+    I64 start = Fingerprint(cur);
+    Show(cur, 0);
+    Run(cur, nxt, 0, 1, 1);
+    I64 half = Fingerprint(cur);
+    Run(cur, nxt, 1, 1, 1);
+    I64 full = Fingerprint(cur);
+
+    PrintLn("population stays 3: ", Population(cur) == 3);
+    PrintLn("generation 1 differs: ", half != start);
+    PrintLn("generation 2 matches: ", full == start);
+
+    /* A block: four in a square, which never changes. */
+    PrintLn("");
+    PrintLn("--- block ---");
+    Clear(cur);
+    Set(cur, 1, 1, 1);
+    Set(cur, 2, 1, 1);
+    Set(cur, 1, 2, 1);
+    Set(cur, 2, 2, 1);
+
+    I64 block = Fingerprint(cur);
+    Run(cur, nxt, 0, 4, 0);
+    PrintLn("still life after 4 generations: ", Fingerprint(cur) == block);
+    Show(cur, 4);
+
+    /* A glider: returns to its own shape after four generations, moved one
+     * cell right and one down. Seeding the shifted shape separately and
+     * comparing fingerprints is what checks the displacement. */
+    PrintLn("");
+    PrintLn("--- glider ---");
+    Clear(cur);
+    Set(cur, 1, 0, 1);
+    Set(cur, 2, 1, 1);
+    Set(cur, 0, 2, 1);
+    Set(cur, 1, 2, 1);
+    Set(cur, 2, 2, 1);
+    Show(cur, 0);
+
+    Run(cur, nxt, 0, 4, 0);
+    Show(cur, 4);
+
+    I64[] shifted = MakeGrid(6);
+    Clear(shifted);
+    Set(shifted, 2, 1, 1);
+    Set(shifted, 3, 2, 1);
+    Set(shifted, 1, 3, 1);
+    Set(shifted, 2, 3, 1);
+    Set(shifted, 3, 3, 1);
+
+    PrintLn("population stays 5: ", Population(cur) == 5);
+    PrintLn("moved one cell diagonally: ",
+            Fingerprint(cur) == Fingerprint(shifted));
+}

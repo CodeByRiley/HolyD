@@ -19,8 +19,8 @@
 #include "compiler.h"
 #include "ffi_platform.h"
 
-#include <include/key_codes.h>
-#include <lib/gfx.h>
+#include "platform/gfx.h"
+#include "platform/key_codes.h"
 
 #include <stdint.h>
 #include <stdio.h>

@@ -150,6 +150,8 @@ static Token identifier(Lexer* lexer) {
         if (string_match(lexer->start, "U64", 3)) return make_token(lexer, TOKEN_U64);
         if (string_match(lexer->start, "F64", 3)) return make_token(lexer, TOKEN_F64);
         if (string_match(lexer->start, "int", 3)) return make_token(lexer, TOKEN_INT);
+        if (string_match(lexer->start, "ref", 3)) return make_token(lexer, TOKEN_REF);
+        if (string_match(lexer->start, "out", 3)) return make_token(lexer, TOKEN_OUT);
         if (string_match(lexer->start, "for", 3)) return make_token(lexer, TOKEN_FOR);
         break;
       case 4:
@@ -159,10 +161,14 @@ static Token identifier(Lexer* lexer) {
         if (string_match(lexer->start, "long", 4)) return make_token(lexer, TOKEN_LONG);
         if (string_match(lexer->start, "auto", 4)) return make_token(lexer, TOKEN_AUTO);
         if (string_match(lexer->start, "bool", 4)) return make_token(lexer, TOKEN_BOOL);
+        if (string_match(lexer->start, "lazy", 4)) return make_token(lexer, TOKEN_LAZY);
         if (string_match(lexer->start, "else", 4)) return make_token(lexer, TOKEN_ELSE);
         break;
       case 5:
         if (string_match(lexer->start, "ulong", 5)) return make_token(lexer, TOKEN_ULONG);
+        if (string_match(lexer->start, "const", 5)) return make_token(lexer, TOKEN_CONST);
+        if (string_match(lexer->start, "inout", 5)) return make_token(lexer, TOKEN_INOUT);
+        if (string_match(lexer->start, "scope", 5)) return make_token(lexer, TOKEN_SCOPE);
         if (string_match(lexer->start, "while", 5)) return make_token(lexer, TOKEN_WHILE);
         if (string_match(lexer->start, "false", 5)) return make_token(lexer, TOKEN_FALSE);
         break;
@@ -172,9 +178,18 @@ static Token identifier(Lexer* lexer) {
         if (string_match(lexer->start, "return", 6)) return make_token(lexer, TOKEN_RETURN);
         if (string_match(lexer->start, "module", 6)) return make_token(lexer, TOKEN_MODULE);
         if (string_match(lexer->start, "import", 6)) return make_token(lexer, TOKEN_IMPORT);
+        if (string_match(lexer->start, "shared", 6)) return make_token(lexer, TOKEN_SHARED);
+        if (string_match(lexer->start, "typeof", 6)) return make_token(lexer, TOKEN_TYPEOF);
         break;
       case 7:
         if (string_match(lexer->start, "foreach", 7)) return make_token(lexer, TOKEN_FOREACH);
+        break;
+      case 8:
+        if (string_match(lexer->start, "function", 8)) return make_token(lexer, TOKEN_FUNCTION);
+        if (string_match(lexer->start, "delegate", 8)) return make_token(lexer, TOKEN_DELEGATE);
+        break;
+      case 9:
+        if (string_match(lexer->start, "immutable", 9)) return make_token(lexer, TOKEN_IMMUTABLE);
         break;
     }
 
@@ -201,7 +216,6 @@ Token LexerNextToken(Lexer* lexer) {
 
     if (is_digit(c)) return number(lexer);
     if (is_alpha(c)) return identifier(lexer);
-
     switch (c) {
         // case '\\': return make_token(lexer, TOKEN_BACKSLASH);
         // case '"': return make_token(lexer, TOKEN_QUOTE);
@@ -214,6 +228,53 @@ Token LexerNextToken(Lexer* lexer) {
         case ';': return make_token(lexer, TOKEN_SEMICOLON);
         case ':': return make_token(lexer, TOKEN_COLON);
         case ',': return make_token(lexer, TOKEN_COMMA);
+        /* Longest run wins throughout: every operator that is a prefix of a
+         * longer one has to test for the longer one first, or `>>>=` lexes
+         * as `>>` `>=` and the error lands nowhere near the cause. The
+         * nesting below reads as the munch order. */
+        case '+':
+            if (match(lexer, '+')) return make_token(lexer, TOKEN_PLUSPLUS);
+            return make_token(lexer, match(lexer, '=') ? TOKEN_PLUS_ASSIGN : TOKEN_PLUS);
+        case '-':
+            if (match(lexer, '-')) return make_token(lexer, TOKEN_MINUSMINUS);
+            return make_token(lexer, match(lexer, '=') ? TOKEN_MINUS_ASSIGN : TOKEN_MINUS);
+        case '*': return make_token(lexer, match(lexer, '=') ? TOKEN_STAR_ASSIGN : TOKEN_STAR);
+        /* Line and block comments were already consumed by
+         * skip_whitespace, so a '/' reaching here is division. */
+        case '/': return make_token(lexer, match(lexer, '=') ? TOKEN_SLASH_ASSIGN : TOKEN_SLASH);
+        case '%': return make_token(lexer, match(lexer, '=') ? TOKEN_PERCENT_ASSIGN : TOKEN_PERCENT);
+        case '~': return make_token(lexer, match(lexer, '=') ? TOKEN_TILDE_ASSIGN : TOKEN_TILDE);
+        case '&':
+            if (match(lexer, '&')) return make_token(lexer, TOKEN_ANDAND);
+            return make_token(lexer, match(lexer, '=') ? TOKEN_AND_ASSIGN : TOKEN_AMPERSAND);
+        case '|':
+            if (match(lexer, '|')) return make_token(lexer, TOKEN_OROR);
+            return make_token(lexer, match(lexer, '=') ? TOKEN_OR_ASSIGN : TOKEN_OR);
+        /* '^^' is exponentiation and '^' is xor, so the doubled form has to
+         * be taken before the '=' test , otherwise '^^=' reads as '^' '^='. */
+        case '^':
+            if (match(lexer, '^')) {
+                return make_token(lexer, match(lexer, '=') ? TOKEN_POW_ASSIGN : TOKEN_POW);
+            }
+            return make_token(lexer, match(lexer, '=') ? TOKEN_XOR_ASSIGN : TOKEN_XOR);
+        case '!': return make_token(lexer, match(lexer, '=') ? TOKEN_NEQ : TOKEN_BANG);
+        case '=': return make_token(lexer, match(lexer, '=') ? TOKEN_EQEQ : TOKEN_ASSIGN);
+        case '<':
+            if (match(lexer, '<')) {
+                return make_token(lexer, match(lexer, '=') ? TOKEN_SHL_ASSIGN : TOKEN_SHL);
+            }
+            return make_token(lexer, match(lexer, '=') ? TOKEN_LTEQ : TOKEN_LT);
+        /* Four deep: >>>= then >>> then >>= then >> then >= then >. */
+        case '>':
+            if (match(lexer, '>')) {
+                if (match(lexer, '>')) {
+                    return make_token(lexer, match(lexer, '=') ? TOKEN_USHR_ASSIGN : TOKEN_USHR);
+                }
+                return make_token(lexer, match(lexer, '=') ? TOKEN_SHR_ASSIGN : TOKEN_SHR);
+            }
+            return make_token(lexer, match(lexer, '=') ? TOKEN_GTEQ : TOKEN_GT);
+        case '"': return string(lexer);
+        /* Longer */
         case '.':
             /* Longest run wins: '...' before '..' before a lone '.'. */
             if (peek(lexer) == '.' && peek_next(lexer) == '.') {
@@ -226,17 +287,6 @@ Token LexerNextToken(Lexer* lexer) {
                 return make_token(lexer, TOKEN_DOTDOT);
             }
             return make_token(lexer, TOKEN_DOT);
-        case '+': return make_token(lexer, match(lexer, '+') ? TOKEN_PLUSPLUS : TOKEN_PLUS);
-        case '-': return make_token(lexer, match(lexer, '-') ? TOKEN_MINUSMINUS : TOKEN_MINUS);
-        case '*': return make_token(lexer, TOKEN_STAR);
-        case '/': return make_token(lexer, TOKEN_SLASH);
-        case '~': return make_token(lexer, TOKEN_TILDE);
-        case '&': return make_token(lexer, TOKEN_AMPERSAND);
-        case '!': return make_token(lexer, match(lexer, '=') ? TOKEN_NEQ : TOKEN_BANG);
-        case '=': return make_token(lexer, match(lexer, '=') ? TOKEN_EQEQ : TOKEN_ASSIGN);
-        case '<': return make_token(lexer, match(lexer, '=') ? TOKEN_LTEQ : TOKEN_LT);
-        case '>': return make_token(lexer, match(lexer, '=') ? TOKEN_GTEQ : TOKEN_GT);
-        case '"': return string(lexer);
     }
 
     return make_token(lexer, TOKEN_UNKNOWN);
@@ -279,7 +329,40 @@ const char* TokenTypeToString(TokenType type) {
         case TOKEN_FALSE: return "FALSE";
         case TOKEN_MODULE: return "MODULE";
         case TOKEN_IMPORT: return "IMPORT";
+        case TOKEN_CONST: return "CONST";
+        case TOKEN_IMMUTABLE: return "IMMUTABLE";
+        case TOKEN_SHARED: return "SHARED";
+        case TOKEN_INOUT: return "INOUT";
+        case TOKEN_FUNCTION: return "FUNCTION";
+        case TOKEN_DELEGATE: return "DELEGATE";
+        case TOKEN_TYPEOF: return "TYPEOF";
+        case TOKEN_REF: return "REF";
+        case TOKEN_OUT: return "OUT";
+        case TOKEN_LAZY: return "LAZY";
+        case TOKEN_SCOPE: return "SCOPE";
         case TOKEN_ASSIGN: return "ASSIGN";
+        case TOKEN_ANDAND: return "ANDAND";
+        case TOKEN_OROR: return "OROR";
+        case TOKEN_PERCENT: return "PERCENT";
+        case TOKEN_POW: return "POW";
+        case TOKEN_OR: return "OR";
+        case TOKEN_XOR: return "XOR";
+        case TOKEN_SHL: return "SHL";
+        case TOKEN_SHR: return "SHR";
+        case TOKEN_USHR: return "USHR";
+        case TOKEN_PLUS_ASSIGN: return "PLUS_ASSIGN";
+        case TOKEN_MINUS_ASSIGN: return "MINUS_ASSIGN";
+        case TOKEN_STAR_ASSIGN: return "STAR_ASSIGN";
+        case TOKEN_SLASH_ASSIGN: return "SLASH_ASSIGN";
+        case TOKEN_PERCENT_ASSIGN: return "PERCENT_ASSIGN";
+        case TOKEN_POW_ASSIGN: return "POW_ASSIGN";
+        case TOKEN_TILDE_ASSIGN: return "TILDE_ASSIGN";
+        case TOKEN_AND_ASSIGN: return "AND_ASSIGN";
+        case TOKEN_OR_ASSIGN: return "OR_ASSIGN";
+        case TOKEN_XOR_ASSIGN: return "XOR_ASSIGN";
+        case TOKEN_SHL_ASSIGN: return "SHL_ASSIGN";
+        case TOKEN_SHR_ASSIGN: return "SHR_ASSIGN";
+        case TOKEN_USHR_ASSIGN: return "USHR_ASSIGN";
         case TOKEN_PLUSPLUS: return "PLUSPLUS";
         case TOKEN_MINUSMINUS: return "MINUSMINUS";
         case TOKEN_PLUS: return "PLUS";

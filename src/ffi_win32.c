@@ -18,7 +18,7 @@
  */
 #include "ffi_platform.h"
 
-#include <lib/gfx.h>
+#include "platform/gfx.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN

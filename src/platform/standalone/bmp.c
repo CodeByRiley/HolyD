@@ -1,4 +1,4 @@
-/* userspace/lib/bmp.c , minimal BMP decoder.
+/* HolyD standalone BMP implementation , minimal BMP decoder.
  *
  * Handles the shapes an image editor actually emits for a small sprite:
  * BITMAPINFOHEADER through BITMAPV5HEADER, 24- or 32-bit, BI_RGB or
@@ -9,8 +9,8 @@
  * Everything is read into memory in one go , these are sprites, not
  * photographs, and the FAT driver has no readahead worth streaming for.
  */
-#include "bmp.h"
-#include <lib/syscall.h>
+#include "../bmp.h"
+#include "syscall.h"
 
 #ifdef _WIN32
 /* Spelled out rather than pulled from <stdio.h> or <io.h>: every MinGW

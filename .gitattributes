@@ -1,11 +1,5 @@
-# Shell scripts must keep LF endings.
-#
-# tools/sync-from-tos.sh runs under bash. On a fresh checkout Git's autocrlf
-# turns its line endings into CRLF, and bash then reads the first line as
-# `set -euo pipefail\r` and dies with "set: pipefail: invalid option name".
-# A long-lived working copy usually still has LF, so this only breaks for
-# someone cloning fresh , which is everyone but the author. TOS hit exactly
-# this and fixed it the same way.
+# Shell scripts must keep LF endings so a Windows checkout can still run them
+# under bash.
 *.sh text eol=lf
 
 # .hd scripts get copied into a FAT image and read by holyd's lexer. The

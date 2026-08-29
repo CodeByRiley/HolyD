@@ -1,7 +1,6 @@
-/* vendor/tos/lib/syscall.h , the sliver of TOS's syscall.h that bmp.c wants.
+/* HolyD's standalone syscall shim , the sliver that bmp.c wants.
  *
- * This is the one vendored file that is NOT a copy of anything in the TOS
- * tree. TOS's real lib/syscall.h is the whole kernel interface; bmp.c pulls
+ * TOS's real lib/syscall.h is the whole kernel interface; bmp.c pulls
  * it in for four calls, and those four are all a host build needs.
  *
  * The prototypes deliberately keep TOS's `long` returns rather than the
@@ -10,8 +9,8 @@
  * real ones instead is a hard error: MinGW redeclares open/close/unlink with
  * conflicting types the moment either header is visible.
  */
-#ifndef HOLYD_VENDOR_TOS_SYSCALL_H
-#define HOLYD_VENDOR_TOS_SYSCALL_H
+#ifndef HOLYD_STANDALONE_SYSCALL_H
+#define HOLYD_STANDALONE_SYSCALL_H
 
 #include <stddef.h>
 
