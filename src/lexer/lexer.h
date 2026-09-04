@@ -39,6 +39,7 @@ typedef enum {
     TOKEN_ELSE,         		// else
     TOKEN_WHILE,        		// while
     TOKEN_RETURN,       		// return
+    TOKEN_GOTO,         		// goto
     TOKEN_TRUE,         		// true
     TOKEN_FALSE,        		// false
     TOKEN_MODULE,       		// module
@@ -116,6 +117,7 @@ typedef enum {
     TOKEN_RBRACE,       		// }
     TOKEN_LBRACKET,     		// [
     TOKEN_RBRACKET,     		// ]
+    TOKEN_QUESTION,     		// ?
 
     TOKEN_LAMBDA, 					// =>
 

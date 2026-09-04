@@ -115,4 +115,25 @@ U0 main() {
     if (!(a > 10)) {
         PrintLn("  ", a, " is not greater than ten");
     }
+
+    PrintLn("");
+    PrintLn("conditional operator:");
+    PrintLn("  true arm       = ", 1 ? 10 : 20);
+    PrintLn("  false arm      = ", 0 ? 10 : 20);
+    PrintLn("  right-assoc    = ", 0 ? 1 : 1 ? 2 : 3);
+    PrintLn("  nested true    = ", 1 ? 0 ? 4 : 5 : 6);
+    PrintLn("  below ||       = ", 0 || 1 ? 7 : 8);
+    PrintLn("  string result  = ", 0 ? "no" : "yes");
+
+    /* As with && and ||, checking only the result would miss an eager
+     * implementation. Loud makes it visible that one arm is skipped. */
+    PrintLn("  only the selected true arm is evaluated:");
+    PrintLn("  result ", Loud(1, 1) ? Loud(11, 2) : Loud(22, 3));
+    PrintLn("  only the selected false arm is evaluated:");
+    PrintLn("  result ", Loud(0, 1) ? Loud(11, 2) : Loud(22, 3));
+
+    PrintLn("  calls in statement position:");
+    a == 5 ? PrintLn("  a is 5") : PrintLn("  a is not 5");
+    a == 6 ? PrintLn("  a is 6") : PrintLn("  a is not 6");
+    a == 5 ? a == 6 ? PrintLn("  a is 5 and 6") : PrintLn("  a is 5 but not 6") : PrintLn("  a is not 5");
 }

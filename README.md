@@ -58,15 +58,19 @@ itself, `ws2_32` for `UdpSocket`.
 holyd <source.hd>          run a script
 holyd --test [dir]         run every .hd under dir (default holyd/tests/)
 holyd -tokens <source.hd>  print the token stream
+holyd --dump-symbols ...   print resolved names and frame slots
 holyd --dump-bytecode ...  disassemble before running
 holyd --interpret ...      walk the AST instead of running bytecode
 holyd --emit-c <source.hd> translate to C instead of running it
+holyd --emit-asm <source.hd>  translate to x86-64 assembly instead
 holyd --emit-c ... -o out.c   where to write it
 holyd --help
 ```
 
 `--interpret` has no FFI: the tree walker predates it, so the `Win*` and
-`Udp*` natives resolve only under the bytecode VM.
+`Udp*` natives resolve only under the bytecode VM. It refuses `goto` for the
+same reason , it runs the AST by recursion, so a jump would have to unwind
+out of every enclosing node and then find its way back in.
 
 ## Compiling to an executable
 
@@ -98,17 +102,62 @@ gcc -std=gnu11 -O2 -I src gui.c \
 ```
 
 It is a bootstrap backend, not a fast one. Control flow becomes real C
-control flow and calls become direct C calls, but values stay boxed
-`HDValue`s and variables stay in the runtime `Environment`, so the arithmetic
-costs what it costs in the VM. That is deliberate: every semantic the VM has
-comes along unchanged, which is what lets the two be diffed against each
-other. Making it fast means resolving names to frame slots and giving the
-language a real type system , `docs/roadmap.md` §10.
+control flow, calls become direct C calls, and each name becomes a C local
+or a file-scope static , but values stay boxed `HDValue`s, so the arithmetic
+still costs what it costs in the VM. That is deliberate: every semantic the
+VM has comes along unchanged, which is what lets the two be diffed against
+each other. Making it fast from here means giving the language a real type
+system , `docs/roadmap.md` §10.
+
+A name becoming a C variable does not make it a C *scope*. HolyD scopes
+variables to the function, and a declaration takes effect where it is
+written: until it runs, the name still means whatever the enclosing scope
+makes of it. So each variable is emitted with a bit saying whether it is
+bound yet, and reading one walks the chain the resolver recorded , this
+frame, then a global of the same name, then the `Environment`, which is
+where the FFI constants live and where an undefined name is finally an
+error. `tests/resolution.hd` is that behaviour written out, and `difftest`
+holds both paths to it. Hoisting the declarations instead would have been
+simpler and wrong.
+
+## Compiling through assembly
+
+`--emit-asm` is the same translation one level lower: x86-64 in GNU
+assembler syntax, Win64 calling convention, linking the same runtime.
+
+```
+make compile HD=tests/hello.hd BACKEND=asm
+```
+
+It exists to be the step before emitting machine code directly. Everything
+an object-file writer would need in front of it , instruction selection,
+frame layout, the struct-passing rules , is here and is checked against the
+VM, so what a later `--emit-exe` adds is an encoder and a PE or ELF writer
+rather than a whole code generator.
+
+It is not the faster backend. Every value is still a boxed 56-byte
+`HDValue` and every operator is still a call into the runtime, so an add
+costs an add's worth of argument marshalling either way, and `gcc -O2` beats
+this comfortably by keeping things in registers around those calls. Speed is
+what a type system buys, not what dropping the C compiler buys ,
+`docs/roadmap.md` §10.
+
+What makes it tractable is that `HDValue` is 56 bytes. Both Win64 and SysV
+pass anything over 16 bytes in memory and return it through a hidden
+pointer, so every value travels as an address and none of the register
+classification a smaller struct would need ever comes up.
+
+```
+make difftest       the C backend against the VM
+make difftest-asm   the assembly backend against the VM
+make difftest-all   both
+```
 
 `make difftest` runs every script in `tests/` twice, once on the VM and once
-transpiled and compiled, and fails if the two disagree on stdout or on exit
-status. The VM is the oracle; run it after touching `src/runtime.c` or
-`src/emit_c.c`.
+compiled, and fails if the two disagree on stdout or on exit status. The VM
+is the oracle; run it after touching `src/runtime.c`, `src/emit_c.c` or
+`src/emit_asm.c`. Running both backends is what tells a codegen bug apart
+from a runtime one.
 
 ## Examples
 
@@ -122,6 +171,7 @@ order:
 | `tests/fizzbuzz.hd` | `else if` chains, `%`, and truncating division |
 | `tests/operators.hd` | arithmetic, bitwise, shifts, `^^`, `!`, and short-circuiting made visible |
 | `tests/control_flow.hd` | what to write where `break`, `continue`, `switch` and `do`/`while` would go |
+| `tests/goto.hd` | labels and `goto`, including out of nested loops and into a loop body |
 | `tests/recursion.hd` | recursion, mutual recursion, declaration order |
 | `tests/sorting.hd` | arrays in place, and that a passed array aliases the caller's |
 | `tests/life_text.hd` | a 2D grid in a flat array, and Life's rules checked against known patterns |
@@ -145,7 +195,12 @@ src/            the language, and the natives
   runtime.c       what a HolyD value is and what the operators do. Shared:
                   the VM and transpiled C both run on this, so there is one
                   definition of each operator rather than two.
+  resolve.c       what each name means , one symbol per declaration, one
+                  slot per frame, and the fallback chain a name follows
+                  before its declaration runs. Shared by both backends.
   emit_c.c        the C backend , AST to a C translation unit.
+  emit_asm.c      the assembly backend , AST to x86-64, Win64 ABI. Same
+                  runtime and same resolver as emit_c.c, one level lower.
   ffi.c           every native a script can call. Portable: the drawing
                   calls only ever touch a gfx_surface.
   ffi_platform.h  what a host has to provide , about fourteen functions
@@ -205,6 +260,12 @@ HolyC with D borrowings, and unfinished in ways worth knowing before writing
 much:
 
 - `~` joins strings. `Str()` turns an I64 into one; there is no other way.
+- `goto` and labels work. A label is declared `.name:` and jumped to with
+  `goto name;` or `goto .name;`. A label belongs to the function that
+  declares it, and a jump may land anywhere in that function, including
+  inside a loop body. It may not land inside a `foreach` body it is not
+  already in, because that lowering declares a loop counter on entry.
+  Leaving two loops at once is what it is mostly for.
 - No `break`, `continue`, `switch`, or `do`/`while`. `&&`, `||`, `!`, `%`,
   the bitwise and shift operators, `^^`, and the compound assignments all
   work; `tests/operators.hd` is the tour.

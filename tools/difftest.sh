@@ -1,18 +1,24 @@
 #!/bin/sh
 # Runs every script under tests/ twice: once on the bytecode VM, once
-# transpiled to C and compiled. Fails if the two disagree on stdout or on
+# through a compiling backend. Fails if the two disagree on stdout or on
 # exit status.
 #
-# This is the only thing that makes the C backend trustworthy. The VM is the
-# oracle; the backend is correct exactly insofar as it cannot be told apart
-# from it. Run it after any change to src/runtime.c or src/emit_c.c.
+# This is the only thing that makes either backend trustworthy. The VM is the
+# oracle; a backend is correct exactly insofar as it cannot be told apart
+# from it. Run it after any change to src/runtime.c, src/emit_c.c or
+# src/emit_asm.c.
 #
-#   ./tools/difftest.sh [dir]      default: tests/
+#   ./tools/difftest.sh [dir]              default: tests/, C backend
+#   BACKEND=asm ./tools/difftest.sh [dir]  the x86-64 assembly backend
+#
+# Both backends link the same runtime and go through the same resolver, so
+# running the pair is what tells a codegen bug apart from a runtime one.
 
 set -u
 
 DIR="${1:-tests}"
 BIN="${BIN:-./holyd.exe}"
+BACKEND="${BACKEND:-c}"
 CC="${CC:-gcc}"
 CFLAGS="${CFLAGS:--std=gnu11 -O2}"
 LIBS="-lgdi32 -luser32 -lws2_32"
@@ -55,6 +61,14 @@ then
     exit 2
 fi
 
+case "$BACKEND" in
+    c)   EMIT_FLAG="--emit-c";   EMIT_EXT="c" ;;
+    asm) EMIT_FLAG="--emit-asm"; EMIT_EXT="s" ;;
+    *)   echo "difftest: unknown BACKEND '$BACKEND' , want c or asm"; exit 2 ;;
+esac
+
+echo "difftest: $BACKEND backend"
+
 pass=0
 fail=0
 
@@ -65,7 +79,8 @@ for script in "$DIR"/*.hd; do
     "$BIN" "$script" >"$WORK/$name.vm.out" 2>&1
     vm_status=$?
 
-    if ! "$BIN" --emit-c "$script" -o "$WORK/$name.c" >"$WORK/$name.emit" 2>&1
+    if ! "$BIN" $EMIT_FLAG "$script" -o "$WORK/$name.$EMIT_EXT" \
+            >"$WORK/$name.emit" 2>&1
     then
         echo "FAIL $script , could not transpile"
         sed 's/^/       /' "$WORK/$name.emit"
@@ -74,10 +89,10 @@ for script in "$DIR"/*.hd; do
     fi
 
     # shellcheck disable=SC2086
-    if ! $CC $CFLAGS -I src "$WORK/$name.c" $RUNTIME \
+    if ! $CC $CFLAGS -I src "$WORK/$name.$EMIT_EXT" $RUNTIME \
             -o "$WORK/$name.exe" $LIBS >"$WORK/$name.cc" 2>&1
     then
-        echo "FAIL $script , generated C did not compile"
+        echo "FAIL $script , generated code did not compile"
         sed 's/^/       /' "$WORK/$name.cc" | head -40
         fail=$((fail + 1))
         continue

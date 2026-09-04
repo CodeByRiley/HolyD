@@ -16,12 +16,18 @@
  * walks ever disagree the generated C fails to compile on an undeclared
  * _tN, which is a loud failure rather than a quiet miscompile.
  *
- * Scope. HolyD scopes variables to the function, not the block: EnvDefine
- * overwrites in place and there are no scope opcodes. Emitting real C
- * locals would therefore mean hoisting every declaration, which changes
- * behaviour when a function reads a name before declaring it locally and a
- * global of that name exists. So v1 keeps variables in the Environment and
- * matches the VM exactly. Slot resolution is the next change, not this one.
+ * Scope. HolyD scopes variables to the function, not the block, and a
+ * declaration takes effect where it is written: until it runs, the name
+ * still means whatever the enclosing scope makes of it. So a resolved name
+ * becomes a C object plus a bit saying whether it is bound yet, and reading
+ * it walks the chain the resolver recorded , this frame, then a global of
+ * the same name, then the Environment, which is where the FFI constants
+ * live and where an undefined name is finally an error. Hoisting the
+ * declarations instead would have been wrong for exactly the case that
+ * chain exists to serve.
+ *
+ * Parameters are the one kind of local bound on entry, so they are a plain
+ * C variable with no bit and no chain.
  */
 
 #include "emit_c.h"
@@ -33,9 +39,12 @@
 
 typedef struct {
   FILE *out;
+  const HDResolution *resolution;
   ASTNode **functions; /* AST_FUNC_DECL nodes, in source order */
   int function_count;
-  int temp_counter; /* reset per emitted C function */
+  int temp_counter;  /* reset per emitted C function */
+  int store_counter; /* likewise, for the one-shot value an assignment holds */
+  int scope;         /* resolver function index, or -1 at the top level */
   int had_error;
 } Emitter;
 
@@ -115,6 +124,205 @@ static void write_mangled(Emitter *e, int index, const char *name, int len) {
   }
 }
 
+/* ---------------- Names ---------------------------------------------------- */
+
+/* What a node names in the role it appears in, or NULL when the resolver
+ * recorded nothing for it. */
+static const HDSymbol *symbol_for(Emitter *e, const ASTNode *node,
+                                  HDBindingRole role) {
+  const HDBinding *binding = HDResolutionBinding(e->resolution, node, role);
+  if (!binding)
+    return NULL;
+  return HDResolutionSymbol(e->resolution, binding->symbol_id);
+}
+
+/* One C identifier per slot. The slot number keeps it unique whatever the
+ * script called the name, and the name keeps the output readable. */
+static void write_slot_name(Emitter *e, const HDSymbol *symbol) {
+  fprintf(e->out, symbol->storage == HD_SYMBOL_GLOBAL ? "hd_g%d_" : "hd_v%d_",
+          symbol->slot);
+  for (int i = 0; i < symbol->name_length; i++) {
+    char c = symbol->name[i];
+    fputc((isalnum((unsigned char)c) || c == '_') ? c : '_', e->out);
+  }
+}
+
+/* C labels are function-scoped, so the resolver's index alone would do.
+ * The name comes along because the generated C is meant to be read. */
+static void write_label_name(Emitter *e, int label_index) {
+  const HDLabel *label = HDResolutionLabel(e->resolution, label_index);
+  fprintf(e->out, "hd_lbl_%d_", label_index);
+  if (!label)
+    return;
+  for (int i = 0; i < label->name_length; i++) {
+    char c = label->name[i];
+    fputc((isalnum((unsigned char)c) || c == '_') ? c : '_', e->out);
+  }
+}
+
+/* The companion bit. Parameters have none: they are bound on entry. */
+static int has_bound_bit(const HDSymbol *symbol) {
+  return !(symbol->flags & HD_SYMBOL_PARAMETER);
+}
+
+static void write_bound_name(Emitter *e, const HDSymbol *symbol) {
+  write_slot_name(e, symbol);
+  fputs("_bound", e->out);
+}
+
+static void write_env_name(Emitter *e, const char *name, int length) {
+  fputs("&hd_globals, ", e->out);
+  write_c_string(e, name, length);
+  fprintf(e->out, ", %d", length);
+}
+
+/* The global a local defers to while its own slot is unbound, or NULL. */
+static const HDSymbol *global_fallback(Emitter *e, const HDSymbol *symbol) {
+  const HDSymbol *fallback =
+      HDResolutionSymbol(e->resolution, symbol->fallback_id);
+  if (fallback && fallback->storage == HD_SYMBOL_GLOBAL)
+    return fallback;
+  return NULL;
+}
+
+/* An expression yielding what the name means right now. */
+static void emit_load(Emitter *e, const HDSymbol *symbol, const char *name,
+                      int length) {
+  if (!symbol || symbol->storage == HD_SYMBOL_EXTERNAL) {
+    fputs("HDLoadX(", e->out);
+    write_env_name(e, name, length);
+    fputc(')', e->out);
+    return;
+  }
+
+  if (!has_bound_bit(symbol)) {
+    write_slot_name(e, symbol);
+    return;
+  }
+
+  fputc('(', e->out);
+  write_bound_name(e, symbol);
+  fputs(" ? ", e->out);
+  write_slot_name(e, symbol);
+  fputs(" : ", e->out);
+
+  const HDSymbol *fallback = global_fallback(e, symbol);
+  if (fallback) {
+    fputc('(', e->out);
+    write_bound_name(e, fallback);
+    fputs(" ? ", e->out);
+    write_slot_name(e, fallback);
+    fputs(" : ", e->out);
+  }
+  fputs("HDLoadX(", e->out);
+  write_env_name(e, name, length);
+  fputc(')', e->out);
+  if (fallback)
+    fputc(')', e->out);
+  fputc(')', e->out);
+}
+
+/* A declaration binds its own slot whatever else the name meant, so it is
+ * an assignment to the slot plus its bit. Both halves are written by
+ * emit_define_open / emit_define_close, with the value in between, so the
+ * same pair serves an AST initialiser and the foreach lowering. */
+static void emit_define_open(Emitter *e, const HDSymbol *symbol,
+                             const char *name, int length, int indent) {
+  indent_by(e, indent);
+  if (!symbol || symbol->storage == HD_SYMBOL_EXTERNAL) {
+    fputs("EnvDefine(", e->out);
+    write_env_name(e, name, length);
+    fputs(", ", e->out);
+    return;
+  }
+  write_slot_name(e, symbol);
+  fputs(" = ", e->out);
+}
+
+static void emit_define_close(Emitter *e, const HDSymbol *symbol) {
+  if (!symbol || symbol->storage == HD_SYMBOL_EXTERNAL) {
+    fputs(");\n", e->out);
+    return;
+  }
+  fputs(";", e->out);
+  if (has_bound_bit(symbol)) {
+    fputc(' ', e->out);
+    write_bound_name(e, symbol);
+    fputs(" = 1;", e->out);
+  }
+  fputc('\n', e->out);
+}
+
+/* An assignment writes to whatever the name already means, and only binds a
+ * new slot when the name means nothing yet. The value is evaluated once,
+ * before the chain is walked, which is the order the VM uses. */
+static void emit_store_open(Emitter *e, const HDSymbol *symbol,
+                            const char *name, int length, int indent,
+                            int *id) {
+  indent_by(e, indent);
+  if (!symbol || symbol->storage == HD_SYMBOL_EXTERNAL) {
+    *id = -1;
+    fputs("EnvSet(", e->out);
+    write_env_name(e, name, length);
+    fputs(", ", e->out);
+    return;
+  }
+  if (!has_bound_bit(symbol)) {
+    *id = -1;
+    write_slot_name(e, symbol);
+    fputs(" = ", e->out);
+    return;
+  }
+  *id = e->store_counter++;
+  fprintf(e->out, "{ HDValue _s%d = ", *id);
+}
+
+static void emit_store_close(Emitter *e, const HDSymbol *symbol,
+                             const char *name, int length, int indent,
+                             int id) {
+  if (id < 0) {
+    fputs(symbol && symbol->storage != HD_SYMBOL_EXTERNAL ? ";\n" : ");\n",
+          e->out);
+    return;
+  }
+
+  const HDSymbol *fallback = global_fallback(e, symbol);
+  fputs(";\n", e->out);
+
+  indent_by(e, indent + 1);
+  fputs("if (", e->out);
+  write_bound_name(e, symbol);
+  fputs(") ", e->out);
+  write_slot_name(e, symbol);
+  fprintf(e->out, " = _s%d;\n", id);
+
+  if (fallback) {
+    indent_by(e, indent + 1);
+    fputs("else if (", e->out);
+    write_bound_name(e, fallback);
+    fputs(") ", e->out);
+    write_slot_name(e, fallback);
+    fprintf(e->out, " = _s%d;\n", id);
+  }
+
+  indent_by(e, indent + 1);
+  fputs("else if (EnvGet(", e->out);
+  write_env_name(e, name, length);
+  fputs(")) EnvSet(", e->out);
+  write_env_name(e, name, length);
+  fprintf(e->out, ", _s%d);\n", id);
+
+  indent_by(e, indent + 1);
+  fputs("else { ", e->out);
+  write_slot_name(e, symbol);
+  fprintf(e->out, " = _s%d; ", id);
+  write_bound_name(e, symbol);
+  fputs(" = 1; }\n", e->out);
+
+  indent_by(e, indent);
+  fputs("}\n", e->out);
+}
+
 /* ---------------- Call-site temporaries ---------------------------------- */
 
 /* Pre-order, matching emit_expression: a node takes its id before its
@@ -149,6 +357,11 @@ static void count_expression(Emitter *e, ASTNode *node, int *max_argc,
     break;
   case AST_UNARY_OP:
     count_expression(e, node->as.unary_op.operand, max_argc, capacity);
+    break;
+  case AST_TERNARY_OP:
+    count_expression(e, node->as.ternary_op.condition, max_argc, capacity);
+    count_expression(e, node->as.ternary_op.true_expr, max_argc, capacity);
+    count_expression(e, node->as.ternary_op.false_expr, max_argc, capacity);
     break;
   case AST_ARRAY_LEN_EXPR:
     count_expression(e, node->as.array_length_expr.target, max_argc, capacity);
@@ -210,6 +423,12 @@ static void count_statement(Emitter *e, ASTNode *node, int *max_argc,
     count_expression(e, node->as.return_statement.expression, max_argc, capacity);
     break;
   case AST_FUNC_DECL:
+    break;
+  case AST_LABEL:
+  case AST_GOTO:
+    /* Neither takes a call-site temporary. Spelled out rather than left to
+     * the default, because this walk and emit_statement have to allocate
+     * ids in lockstep. */
     break;
   case AST_STRING:
     count_call(e, node, 1, max_argc, capacity); /* the implicit Print */
@@ -399,9 +618,9 @@ static void emit_expression(Emitter *e, ASTNode *node) {
     break;
 
   case AST_VAR_REF:
-    fputs("HDLoadX(env, ", e->out);
-    write_c_string(e, node->as.variable_ref.name, node->as.variable_ref.name_length);
-    fprintf(e->out, ", %d)", node->as.variable_ref.name_length);
+    emit_load(e, symbol_for(e, node, HD_BINDING_READ),
+              node->as.variable_ref.name,
+              node->as.variable_ref.name_length);
     break;
 
   case AST_BINARY_OP: {
@@ -454,6 +673,16 @@ static void emit_expression(Emitter *e, ASTNode *node) {
     }
     break;
 
+  case AST_TERNARY_OP:
+    fputs("(HDTruthy(", e->out);
+    emit_expression(e, node->as.ternary_op.condition);
+    fputs(") ? ", e->out);
+    emit_expression(e, node->as.ternary_op.true_expr);
+    fputs(" : ", e->out);
+    emit_expression(e, node->as.ternary_op.false_expr);
+    fputc(')', e->out);
+    break;
+
   case AST_INDEX:
     fputs("HDIndexX(", e->out);
     emit_expression(e, node->as.index_expr.target);
@@ -497,23 +726,25 @@ static void emit_statement(Emitter *e, ASTNode *node, int indent) {
     return;
 
   switch (node->type) {
-  case AST_VAR_DECL:
-    indent_by(e, indent);
-    fputs("EnvDefine(env, ", e->out);
-    write_c_string(e, node->as.variable_decl.name, node->as.variable_decl.name_length);
-    fprintf(e->out, ", %d, ", node->as.variable_decl.name_length);
+  case AST_VAR_DECL: {
+    const HDSymbol *symbol = symbol_for(e, node, HD_BINDING_DECLARATION);
+    emit_define_open(e, symbol, node->as.variable_decl.name,
+                     node->as.variable_decl.name_length, indent);
     emit_expression(e, node->as.variable_decl.initializer);
-    fputs(");\n", e->out);
+    emit_define_close(e, symbol);
     break;
+  }
 
-  case AST_ASSIGN:
-    indent_by(e, indent);
-    fputs("EnvSet(env, ", e->out);
-    write_c_string(e, node->as.assignment.name, node->as.assignment.name_length);
-    fprintf(e->out, ", %d, ", node->as.assignment.name_length);
+  case AST_ASSIGN: {
+    const HDSymbol *symbol = symbol_for(e, node, HD_BINDING_WRITE);
+    int id;
+    emit_store_open(e, symbol, node->as.assignment.name,
+                    node->as.assignment.name_length, indent, &id);
     emit_expression(e, node->as.assignment.value);
-    fputs(");\n", e->out);
+    emit_store_close(e, symbol, node->as.assignment.name,
+                     node->as.assignment.name_length, indent, id);
     break;
+  }
 
   case AST_INDEX_ASSIGN: {
     /* Target, index and value are three ordered evaluations, so they go
@@ -605,17 +836,22 @@ static void emit_statement(Emitter *e, ASTNode *node, int indent) {
     fprintf(e->out,
             "while (_fe%d < HDLengthX(_t%d[0]).i64) {\n", id, id);
 
-    indent_by(e, indent + 2);
-    fputs("EnvDefine(env, ", e->out);
-    write_c_string(e, node->as.foreach_statement.variable_name, node->as.foreach_statement.variable_name_length);
-    fprintf(e->out, ", %d, HDIndexX(_t%d[0], int_value(_fe%d)));\n",
-            node->as.foreach_statement.variable_name_length, id, id);
+    const HDSymbol *value_symbol =
+        symbol_for(e, node, HD_BINDING_FOREACH_VALUE);
+    emit_define_open(e, value_symbol, node->as.foreach_statement.variable_name,
+                     node->as.foreach_statement.variable_name_length,
+                     indent + 2);
+    fprintf(e->out, "HDIndexX(_t%d[0], int_value(_fe%d))", id, id);
+    emit_define_close(e, value_symbol);
 
     if (node->as.foreach_statement.index_name != NULL) {
-      indent_by(e, indent + 2);
-      fputs("EnvDefine(env, ", e->out);
-      write_c_string(e, node->as.foreach_statement.index_name, node->as.foreach_statement.index_name_length);
-      fprintf(e->out, ", %d, int_value(_fe%d));\n", node->as.foreach_statement.index_name_length, id);
+      const HDSymbol *index_symbol =
+          symbol_for(e, node, HD_BINDING_FOREACH_INDEX);
+      emit_define_open(e, index_symbol, node->as.foreach_statement.index_name,
+                       node->as.foreach_statement.index_name_length,
+                       indent + 2);
+      fprintf(e->out, "int_value(_fe%d)", id);
+      emit_define_close(e, index_symbol);
     }
 
     emit_body(e, node->as.foreach_statement.body, indent + 2);
@@ -631,6 +867,30 @@ static void emit_statement(Emitter *e, ASTNode *node, int indent) {
 
   case AST_FUNC_DECL:
     break;
+
+  /* A trailing `;` because C wants a statement after a label, and a label
+   * is allowed to be the last thing in a block. */
+  case AST_LABEL:
+    indent_by(e, indent);
+    write_label_name(e, HDResolutionLabelIndex(e->resolution, node));
+    fputs(": ;\n", e->out);
+    break;
+
+  /* The resolver has already established that the label exists, is in this
+   * function, and is not inside a foreach body this goto sits outside of ,
+   * which is what makes a plain C goto a faithful lowering. */
+  case AST_GOTO: {
+    int label_index = HDResolutionGotoLabel(e->resolution, node);
+    if (label_index < 0) {
+      emit_error(e, "goto was not resolved to a label.");
+      break;
+    }
+    indent_by(e, indent);
+    fputs("goto ", e->out);
+    write_label_name(e, label_index);
+    fputs(";\n", e->out);
+    break;
+  }
 
   case AST_RETURN:
     indent_by(e, indent);
@@ -773,6 +1033,54 @@ static int stmt_calls(Emitter *e, ASTNode *node, const char *name, int len) {
 
 /* ---------------- Translation unit ---------------------------------------- */
 
+/* One C declaration per frame slot. Parameters take their argument and no
+ * bound bit; everything else starts unbound, so a read before the
+ * declaration runs falls through to the enclosing scope the way it does in
+ * the VM.
+ *
+ * Two parameters of the same name resolve to one symbol and so share a
+ * slot. Initialising from the last of them leaves it holding the slot, as
+ * repeated EnvDefine calls did. */
+static void declare_frame(Emitter *e, const HDResolvedFunction *scope,
+                          int indent) {
+  for (int slot = 0; slot < scope->frame_slot_count; slot++) {
+    const HDSymbol *symbol =
+        HDResolutionSlotSymbol(e->resolution, e->scope, slot);
+    if (!symbol)
+      continue;
+
+    int parameter = -1;
+    for (int i = 0; i < scope->parameter_count; i++) {
+      if (scope->parameter_slots[i] == slot)
+        parameter = i;
+    }
+
+    indent_by(e, indent);
+    fputs("HDValue ", e->out);
+    write_slot_name(e, symbol);
+    if (parameter >= 0)
+      fprintf(e->out, " = p%d;\n", parameter);
+    else
+      fputs(" = {0};\n", e->out);
+
+    if (has_bound_bit(symbol)) {
+      indent_by(e, indent);
+      fputs("int ", e->out);
+      write_bound_name(e, symbol);
+      fputs(" = 0;\n", e->out);
+    }
+
+    /* A slot the body only ever writes is still a slot. Say so, rather than
+     * hand the C compiler an unused-variable warning about it. */
+    if (!HDResolutionSymbolIsRead(e->resolution, symbol->id)) {
+      indent_by(e, indent);
+      fputs("(void)", e->out);
+      write_slot_name(e, symbol);
+      fputs(";\n", e->out);
+    }
+  }
+}
+
 static void emit_function(Emitter *e, int index) {
   ASTNode *fn = e->functions[index];
 
@@ -787,17 +1095,10 @@ static void emit_function(Emitter *e, int index) {
   }
   fputs(") {\n", e->out);
 
-  fputs("  Environment env_storage;\n", e->out);
-  fputs("  Environment *env = &env_storage;\n", e->out);
-  fputs("  EnvInitChild(env, &hd_globals);\n", e->out);
-
-  for (int i = 0; i < fn->as.function_decl.parameter_count; i++) {
-    fputs("  EnvDefine(env, ", e->out);
-    write_c_string(e, fn->as.function_decl.parameters[i].name,
-                   fn->as.function_decl.parameters[i].name_length);
-    fprintf(e->out, ", %d, p%d);\n",
-            fn->as.function_decl.parameters[i].name_length, i);
-  }
+  e->scope = HDResolutionFunctionIndex(e->resolution, fn);
+  e->store_counter = 0;
+  if (e->scope >= 0)
+    declare_frame(e, &e->resolution->functions[e->scope], 1);
 
   declare_temps(e, fn->as.function_decl.body, 1);
   fputc('\n', e->out);
@@ -807,14 +1108,19 @@ static void emit_function(Emitter *e, int index) {
   /* Falling off the end is the VM's implicit `return 0`. */
   fputs("  return int_value(0);\n", e->out);
   fputs("}\n\n", e->out);
+  e->scope = -1;
 }
 
-int HDEmitC(ASTNode *ast, FILE *out, const char *source_name) {
+int HDEmitC(ASTNode *ast, const HDResolution *resolution, FILE *out,
+            const char *source_name) {
   Emitter e;
   e.out = out;
+  e.resolution = resolution;
   e.functions = NULL;
   e.function_count = 0;
   e.temp_counter = 0;
+  e.store_counter = 0;
+  e.scope = -1;
   e.had_error = 0;
 
   if (!ast || ast->type != AST_BLOCK) {
@@ -849,7 +1155,28 @@ int HDEmitC(ASTNode *ast, FILE *out, const char *source_name) {
   fputs("#include \"runtime.h\"\n", out);
   fputs("#include \"ffi.h\"\n", out);
   fputs("#include <stdlib.h>\n\n", out);
+  /* The Environment is no longer where variables live. It holds the FFI
+   * constants, and it is the last link in a name's fallback chain, which is
+   * both where those constants are found and where an undefined name
+   * finally becomes an error. */
   fputs("static Environment hd_globals;\n\n", out);
+
+  /* One static per global slot. Zero-initialised, so nothing is bound until
+   * a declaration or an assignment runs, exactly as in the VM. */
+  if (resolution->global_slot_count > 0) {
+    for (int slot = 0; slot < resolution->global_slot_count; slot++) {
+      const HDSymbol *symbol = HDResolutionSlotSymbol(resolution, -1, slot);
+      if (!symbol)
+        continue;
+      fputs("static HDValue ", out);
+      write_slot_name(&e, symbol);
+      fputs(";\n", out);
+      fputs("static int ", out);
+      write_bound_name(&e, symbol);
+      fputs(";\n", out);
+    }
+    fputc('\n', out);
+  }
 
   /* Prototypes ahead of bodies, so functions may call each other in any
    * order and recursion works. */
@@ -876,7 +1203,6 @@ int HDEmitC(ASTNode *ast, FILE *out, const char *source_name) {
   /* The top level runs in the globals environment itself, exactly as the
    * VM's main chunk does. */
   fputs("int main(void) {\n", out);
-  fputs("  Environment *env = &hd_globals;\n", out);
   fputs("  EnvInit(&hd_globals);\n", out);
   fputs("  /* Before the program, so a script that assigns over EV_KEY_DOWN "
         "wins. */\n",
@@ -910,6 +1236,8 @@ int HDEmitC(ASTNode *ast, FILE *out, const char *source_name) {
     top.as.block.statement_count = count;
   }
 
+  e.scope = -1;
+  e.store_counter = 0;
   declare_temps(&e, &top, 1);
   fputc('\n', out);
 

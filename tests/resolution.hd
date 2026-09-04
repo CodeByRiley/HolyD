@@ -1,0 +1,100 @@
+/* The resolver assigns one slot per name in each function, and the VM and
+ * the C backend both read and write those slots. What a slot does not do is
+ * hoist: a declaration still becomes active only when execution reaches it,
+ * and until then the name means whatever the enclosing scope makes of it.
+ *
+ * These cases pin that down on both execution paths. tools/difftest.sh runs
+ * them on the VM and transpiled, and the two have to agree.
+ */
+
+I64 value = 10;
+
+U0 Probe(I64 declareLocal) {
+    PrintLn("  before: ", value);
+    if (declareLocal) {
+        I64 value = 20;
+    }
+    PrintLn("  after declaration branch: ", value);
+    value = 30;
+    PrintLn("  after assignment: ", value);
+}
+
+U0 ImplicitLocal() {
+    madeByAssignment = 7;
+    PrintLn("  implicit local: ", madeByAssignment);
+}
+
+/* A parameter is the one kind of local bound before the body runs, so it
+ * shadows a same-named global from the first statement onwards. */
+I64 common = 1;
+
+I64 Shadow(I64 common) {
+    PrintLn("  parameter wins: ", common);
+    common = common + 100;
+    PrintLn("  writes hit the parameter: ", common);
+    return common;
+}
+
+/* One frame per activation: recursion must not share slots, and a
+ * declaration one call reaches must not still be active in the next. */
+I64 calls = 0;
+
+I64 Countdown(I64 n) {
+    if (n <= 0) {
+        return 0;
+    }
+    I64 mine = n * 10;
+    I64 rest = Countdown(n - 1);
+    return mine + rest;
+}
+
+U0 Conditional(I64 declare) {
+    if (declare) {
+        I64 seen = 1;
+        PrintLn("  declared, seen=", seen);
+    }
+    calls = calls + 1;
+    PrintLn("  calls=", calls);
+}
+
+/* An FFI constant has no slot of its own, so a script that assigns over one
+ * has to win from the assignment onwards and nowhere earlier. */
+U0 Constants() {
+    PrintLn("  before assigning: ", COLOR_RED);
+    COLOR_RED = 99;
+    PrintLn("  after assigning: ", COLOR_RED, " (COLOR_BLUE ", COLOR_BLUE, ")");
+}
+
+U0 main() {
+    PrintLn("branch not taken (assignment reaches global):");
+    Probe(0);
+    PrintLn("  global is now: ", value);
+
+    value = 10;
+    PrintLn("branch taken (assignment reaches local):");
+    Probe(1);
+    PrintLn("  global stayed: ", value);
+
+    ImplicitLocal();
+
+    PrintLn("parameters:");
+    PrintLn("  returned ", Shadow(5));
+    PrintLn("  global untouched: ", common);
+
+    PrintLn("frames:");
+    PrintLn("  countdown=", Countdown(4));
+    Conditional(1);
+    Conditional(0);
+
+    PrintLn("ffi constants:");
+    Constants();
+
+    PrintLn("top level saw: total=", total, " last v=", v, " last i=", i);
+}
+
+/* foreach at the top level binds its variables in global slots, and they
+ * outlive the loop the way any other global declaration does. */
+I64 total = 0;
+foreach (i, v; [4, 5, 6]) {
+    total = total + v * (i + 1);
+}

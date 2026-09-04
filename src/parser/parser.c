@@ -741,13 +741,34 @@ static ASTNode* ParseLogicalAnd(Parser* parser) {
     return node;
 }
 
-static ASTNode* ParseExpression(Parser* parser) {
+static ASTNode* ParseConditional(Parser* parser) {
     ASTNode* node = ParseLogicalAnd(parser);
     while (check(parser, TOKEN_OROR)) {
         advance(parser);
         node = ASTNewBinaryOp(TOKEN_OROR, node, ParseLogicalAnd(parser));
     }
+
+    if (match(parser, TOKEN_QUESTION)) {
+        ASTNode* true_expr = ParseExpression(parser);
+        if (!match(parser, TOKEN_COLON)) {
+            parser->had_error = 1;
+            printf("Parse error: Expected ':' in conditional expression on line %zu\n",
+                   parser->lexer.line);
+            return NULL;
+        }
+
+        /* Recurse at the same precedence for the false arm, making the
+         * operator right-associative: a ? b : c ? d : e groups as
+         * a ? b : (c ? d : e). */
+        ASTNode* false_expr = ParseConditional(parser);
+        return ASTNewTernaryOp(node, true_expr, false_expr);
+    }
+
     return node;
+}
+
+static ASTNode* ParseExpression(Parser* parser) {
+    return ParseConditional(parser);
 }
 
 /* `a += b` is `a = a + b`. The table is the only place the pairing between
@@ -1043,10 +1064,56 @@ static ASTNode* ParseIgnoredDirective(Parser* parser) {
     return ASTNewBlock(NULL, 0);
 }
 
+/* `.name:` marks a jump target. The leading dot is what makes it a
+ * statement the parser can recognise without lookahead: nothing else in the
+ * grammar begins with one, so a bare name stays an expression statement. */
+static ASTNode* ParseLabel(Parser* parser) {
+    if (!check(parser, TOKEN_IDENTIFIER)) {
+        parser->had_error = 1;
+        printf("Parse error: Expected a label name after '.' on line %zu\n",
+               parser->lexer.line);
+        return NULL;
+    }
+    Token name = parser->current;
+    advance(parser);
+
+    if (!match(parser, TOKEN_COLON)) {
+        parser->had_error = 1;
+        printf("Parse error: Expected ':' after label '.%.*s' on line %zu\n",
+               (int)name.length, name.start, parser->lexer.line);
+        return NULL;
+    }
+    return ASTNewLabel(name.start, (int)name.length);
+}
+
+/* `goto name;` and `goto .name;` both jump to `.name:`. The dot is what the
+ * declaration needs to be recognisable as one; on a jump it is optional,
+ * since `goto` has already said what follows is a label. */
+static ASTNode* ParseGoto(Parser* parser) {
+    match(parser, TOKEN_DOT);
+
+    if (!check(parser, TOKEN_IDENTIFIER)) {
+        parser->had_error = 1;
+        printf("Parse error: Expected a label name after 'goto' on line %zu\n",
+               parser->lexer.line);
+        return NULL;
+    }
+    Token target = parser->current;
+    advance(parser);
+
+    if (check(parser, TOKEN_SEMICOLON) || check(parser, TOKEN_NEWLINE)) {
+        advance(parser);
+    }
+    return ASTNewGoto(target.start, (int)target.length);
+}
+
 static ASTNode* ParseStatement(Parser* parser) {
     if (match(parser, TOKEN_MODULE) || match(parser, TOKEN_IMPORT)) {
         return ParseIgnoredDirective(parser);
     }
+
+    if (match(parser, TOKEN_DOT)) return ParseLabel(parser);
+    if (match(parser, TOKEN_GOTO)) return ParseGoto(parser);
 
     TypeSyntax* declared_type = ParseOptionalDeclarationType(parser);
     if (declared_type != NULL) {

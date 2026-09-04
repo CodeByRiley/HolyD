@@ -15,6 +15,7 @@ typedef enum {
     AST_INDEX_ASSIGN,   // arr[index] = expr;
     AST_BINARY_OP,      // expr + expr
     AST_UNARY_OP,       // !expr, -expr
+    AST_TERNARY_OP,     // cond ? expr : expr
     AST_CALL,           // Print(expr)
     AST_INDEX,          // array[index]
     AST_ARRAY_LEN_EXPR, // array.length
@@ -23,6 +24,8 @@ typedef enum {
     AST_WHILE,          // while (cond) { block }
     AST_FOR,            // for (init; cond; inc) { block }
     AST_FOREACH,        // foreach (x; arr) { block }
+    AST_GOTO,						// GOTO label
+    AST_LABEL,					// .label: (. defines start of label : defines the end)
     AST_FUNC_DECL,
     AST_RETURN,				  // return expr
 } ASTNodeType;
@@ -74,6 +77,22 @@ typedef struct {
     TokenType operator_type;
     ASTNode* operand;
 } ASTUnaryOp;
+
+typedef struct {
+  ASTNode* condition;
+  ASTNode* true_expr;
+  ASTNode* false_expr;
+} ASTTernaryOp;
+
+typedef struct {
+	const char* name;
+	int len;
+} ASTLabel;
+
+typedef struct {
+	const char* target;
+	int target_len;
+} ASTGoto;
 
 typedef struct {
     ASTNode* target;
@@ -150,6 +169,7 @@ struct ASTNode {
         ASTIndexAssignment index_assignment;
         ASTBinaryOp binary_op;
         ASTUnaryOp unary_op;
+        ASTTernaryOp ternary_op;
         ASTIndexExpr index_expr;
         ASTArrayLengthExpr array_length_expr;
         ASTCall call;
@@ -160,6 +180,8 @@ struct ASTNode {
         ASTForeachStatement foreach_statement;
         ASTFunctionDecl function_decl;
         ASTReturnStatement return_statement;
+        ASTLabel label;
+        ASTGoto goto_statement;
     } as;
 };
 
@@ -172,6 +194,10 @@ ASTNode* ASTNewVarDecl(TypeSyntax* type, const char* name, int len, ASTNode* ini
 ASTNode* ASTNewAssign(const char* name, int len, ASTNode* value);
 ASTNode* ASTNewBinaryOp(TokenType op, ASTNode* left, ASTNode* right);
 ASTNode* ASTNewUnaryOp(TokenType op, ASTNode* operand);
+ASTNode* ASTNewLabel(const char* name, int len);
+ASTNode* ASTNewGoto(const char* target, int len);
+ASTNode* ASTNewTernaryOp(ASTNode* condition, ASTNode* true_expr,
+                         ASTNode* false_expr);
 ASTNode* ASTNewIndex(ASTNode* target, ASTNode* index);
 ASTNode* ASTNewIndexAssign(ASTNode* target, ASTNode* index, ASTNode* value);
 ASTNode* ASTNewArrayLenExpr(ASTNode* target);

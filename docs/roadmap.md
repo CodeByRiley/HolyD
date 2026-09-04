@@ -35,7 +35,8 @@ Pointers, static arrays, dynamic arrays, slices, bounds checks, and pointer
 arithmetic. Explicit memory access remains load-bearing for a systems
 language, while slices should be preferred when a length is known.
 
-switch/case/default, labeled break/continue, and goto with D semantics.
+switch/case/default and labeled break/continue with D semantics. goto and
+labels are in.
 
 Logical, bitwise, shift, power, concatenation, assignment, and conditional
 operators sufficient for expression completeness.
@@ -73,9 +74,8 @@ Wire up the missing flags the front-end can already support.
 --help , done.
 -tokens , done.
 --emit-c and -o , done; see section 10.
--ast , write an ASTPrint(node, indent) recursive function. Half a day. Worth
-more now that the AST is a tagged union and each node kind prints its own
-payload.
+-ast , done. ASTPrint(node, indent) recursively prints each node payload and
+its parsed type syntax.
 -version=NAME and -debug[=NAME] , feed D's conditional-compilation system.
 Do not retain -D as a second spelling for the same feature.
 This is cheap, unblocks debugging, and gives HolyD a D-shaped build model.
@@ -136,7 +136,8 @@ concatenation as a binary operator, so this needs the unary/binary
 distinction the parser now has for minus.
 Postfix/prefix ++/-- as expressions. They parse as statements only; `b =
 a++` does not work.
-Ternary: cond ? a : b.
+Done: ternary `cond ? a : b`, including right associativity and lazy branch
+evaluation on the VM, interpreter, and C backend.
 Cast: cast(Type) expression only.
 Identity and membership: is, !is, in, and !in.
 D is expressions use AST_IS_EXPRESSION; is and !is identity operations stay
@@ -166,11 +167,20 @@ break/continue , represented by AST_BREAK and AST_CONTINUE with an optional
 label. The bytecode already has BC_FLOW_JUMP/BC_FLOW_JUMP_IF_FALSE; add
 loop-context tracking in the compiler.
 do...while , represented by AST_DO_WHILE.
-Labeled statements , outer: for(...) and break outer;, represented by
-AST_LABEL wrapping the labeled statement. The current AST does not yet have
-named control-flow nodes.
-goto and labeled goto , represented by AST_GOTO. They are part of D's
-statement grammar; implement them without framing them as HolyC compatibility.
+goto and labels are done. A label is declared `.name:` and jumped to with
+`goto name;`; AST_LABEL and AST_GOTO carry the name, and src/resolve.c owns
+which point in which function it means. Both backends consume that: the VM
+patches BC_FLOW_JUMP addresses per chunk, and the C emitter writes a real C
+goto. A jump may land anywhere in its own function, including inside a loop
+body, and may not cross into a foreach body from outside it , that lowering
+declares a loop counter on entry, and jumping past it would leave the loop
+reading a counter nothing set. Nothing else can be skipped: every variable
+is a frame slot with its own bound bit, so jumping past a declaration leaves
+the name unbound rather than holding a stale value, identically on both
+paths. `--interpret` refuses goto outright.
+Labeled statements , outer: for(...) and break outer;. This is the remaining
+half: AST_LABEL exists but wraps nothing, and break/continue do not yet take
+a label to name.
 scope(exit), scope(success), and scope(failure) use AST_SCOPE_GUARD with a
 guard kind and body.
 
@@ -270,34 +280,64 @@ The C transpiler is in. `--emit-c` writes a translation unit that links
 against src/runtime.c and produces a standalone executable; see README,
 "Compiling to an executable".
 
+So is a code generator. `--emit-asm` writes x86-64 in GNU assembler syntax
+for the Win64 ABI, links the same runtime, and is held to the VM by
+`make difftest-asm` exactly as the C backend is. It is the deliberate step
+before emitting machine code: instruction selection, frame layout and the
+struct-passing rules are all in it and all checked, so an `--emit-exe`
+after it is an instruction encoder and a PE or ELF writer bolted to a code
+generator that already works, rather than all three at once.
+
+Two facts made it small. HDValue is 56 bytes, and both Win64 and SysV pass
+anything over 16 bytes in memory and return it through a hidden pointer, so
+every value travels as an address and the register classification smaller
+structs would need never arises , that is the C ABI struct-passing layer
+this section used to warn about, and for this language it lands in the easy
+case. And the resolver had already turned every name into a frame slot and
+every label into a jump target, which is most of what a code generator needs
+before it can emit anything.
+
+What it does not buy is speed. Values are still boxed and operators are
+still runtime calls, so it emits the same calls the C backend emits and gcc
+-O2 beats it by keeping things in registers around them. That ordering is
+the point of the next paragraph.
+
 It is a bootstrap backend and deliberately not a fast one. Control flow
 lowers to C control flow and calls lower to direct C calls, but values stay
-boxed HDValues and variables stay in the runtime Environment, so an add
-still costs a call into HDBinary and a variable read still costs a walk of a
-linked list. What that buys is that every semantic the VM has came across
-unchanged, which is what lets tools/difftest.sh hold the two paths to
-byte-identical stdout and exit status. Keep it green: it is the only thing
-making the backend trustworthy.
+boxed HDValues, so an add still costs a call into HDBinary. What that buys
+is that every semantic the VM has came across unchanged, which is what lets
+tools/difftest.sh hold the two paths to byte-identical stdout and exit
+status. Keep it green: it is the only thing making the backend trustworthy.
 
-Two changes make the output fast, in this order. Both are worth having on
-their own terms, and both are shared with any later backend.
+Name resolution is done. src/resolve.c gives every declaration and every use
+a stable program-wide symbol identity and a slot in the global frame or in
+its function frame, and both backends consume those slots: the VM has
+LOCAL_LOAD/DEFINE/STORE and GLOBAL_LOAD/DEFINE/STORE over per-activation
+frames, and the C emitter writes a C local or a file-scope static per slot.
+Neither reads a variable out of the name-keyed Environment any more.
 
-Name resolution. Replace the name-keyed Environment with frame slots
-computed at compile time: locals become real C locals, globals become
-statics. This speeds the VM up as well, and it is testable against difftest
-before the backend changes at all. One constraint to decide deliberately
-rather than by accident: HolyD scopes variables to the function, not the
-block, so slots are per function with declarations hoisted, and hoisting
-changes behaviour where a function reads a name before declaring it locally
-while a global of that name exists.
+What the Environment is still for is the part that could not become a slot.
+HolyD makes a declaration active where it is written, not at the top of its
+frame, so until a declaration runs the name still means whatever the
+enclosing scope means by it. Each slot therefore carries a bound bit, and
+each symbol carries the next link in the search , a local falls back to a
+global of the same name, a global falls back to the Environment, which is
+where the FFI constants live and where an undefined name finally becomes an
+error. Hoisting the declarations would have removed the Environment
+entirely and quietly changed what a program means; tests/resolution.hd is
+the difference, on both paths.
 
-The type system, sections 2 and 3 above. Once expressions carry a static
-type, I64 + I64 emits a + b instead of a call, and a boxed value survives
-only where the value really is dynamic. This is what makes the generated C
-worth compiling rather than merely correct.
+`--dump-symbols` prints the whole table: symbols with their storage, slot
+and fallback, and every binding. `--dump-bytecode` shows the slot operands.
+
+The type system, sections 2 and 3 above, is what is left. Once expressions
+carry a static type, I64 + I64 emits a + b instead of a call, and a boxed
+value survives only where the value really is dynamic. With names already
+resolved to slots, that is what makes the generated C worth compiling
+rather than merely correct.
 
 The remaining backend choices stay open, and are cheaper than they look,
-because name resolution and typing are most of the work and are shared:
+because name resolution is already done and shared, and typing will be:
 
 x86_64 assembly emitter: direct and small, but every runtime and ABI detail
 becomes the compiler's , register allocation, Win64 versus SysV calling

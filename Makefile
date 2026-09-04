@@ -33,8 +33,10 @@ RUNTIME_SRCS := \
 
 SRCS := \
 	src/main.c \
+	src/resolve.c \
 	src/compiler.c \
 	src/emit_c.c \
+	src/emit_asm.c \
 	src/lexer/lexer.c \
 	src/parser/parser.c \
 	src/ast/ast.c \
@@ -61,41 +63,64 @@ test: $(BIN)
 gui: $(BIN)
 	./$(BIN) samples/gui.hd
 
-# Compile one script into a standalone executable through the C backend.
+# Compile one script into a standalone executable, through either backend.
 #
 #   make compile HD=samples/gui.hd              -> build/gui.exe
 #   make compile HD=samples/gui.hd OUT=g.exe    -> g.exe
+#   make compile HD=tests/hello.hd BACKEND=asm  -> via x86-64 assembly
 #   make run     HD=tests/hello.hd              -> build it, then run it
 #
-# The generated C stays in build/ rather than being deleted: it is the thing
-# to read when the backend does something surprising, and difftest compiles
-# its own copy anyway.
+# BACKEND=c writes C and hands it to the C compiler; BACKEND=asm writes
+# x86-64 assembly and hands it to the assembler. Both link the same runtime
+# and produce the same program , see docs/roadmap.md section 10 for why the
+# assembly one exists and why it is not the faster of the two.
+#
+# The generated file stays in build/ rather than being deleted: it is the
+# thing to read when a backend does something surprising, and difftest
+# compiles its own copy anyway.
 BUILD_DIR ?= build
 HD        ?= tests/hello.hd
+BACKEND   ?= c
 HD_NAME    = $(basename $(notdir $(HD)))
-GEN_C      = $(BUILD_DIR)/$(HD_NAME).c
 OUT       ?= $(BUILD_DIR)/$(HD_NAME).exe
+
+ifeq ($(BACKEND),asm)
+EMIT_FLAG  = --emit-asm
+GEN_SRC    = $(BUILD_DIR)/$(HD_NAME).s
+else
+EMIT_FLAG  = --emit-c
+GEN_SRC    = $(BUILD_DIR)/$(HD_NAME).c
+endif
 
 .PHONY: compile
 compile: $(BIN)
 	@test -f "$(HD)" || { echo "make compile: no such script: $(HD)"; exit 1; }
 	@mkdir -p $(BUILD_DIR)
-	./$(BIN) --emit-c $(HD) -o $(GEN_C)
-	$(CC) $(CFLAGS) $(INCLUDES) $(GEN_C) $(RUNTIME_SRCS) -o $(OUT) $(LIBS)
+	./$(BIN) $(EMIT_FLAG) $(HD) -o $(GEN_SRC)
+	$(CC) $(CFLAGS) $(INCLUDES) $(GEN_SRC) $(RUNTIME_SRCS) -o $(OUT) $(LIBS)
 	@echo "make compile: $(OUT)"
 
 .PHONY: run
 run: compile
 	@./$(OUT)
 
-# Runs every script under tests/ twice , once on the VM, once transpiled ,
-# and fails if the two disagree on stdout or exit status.
+# Runs every script under tests/ twice , once on the VM, once compiled , and
+# fails if the two disagree on stdout or exit status. `difftest-asm` does the
+# same through the assembly backend, and `difftest-all` runs both, which is
+# what tells a codegen bug apart from a runtime one.
 .PHONY: difftest
 difftest: $(BIN)
 	./tools/difftest.sh
+
+.PHONY: difftest-asm
+difftest-asm: $(BIN)
+	BACKEND=asm ./tools/difftest.sh
+
+.PHONY: difftest-all
+difftest-all: difftest difftest-asm
 
 .PHONY: clean
 clean:
 	rm -f $(BIN) a.exe
 	rm -rf $(BUILD_DIR)
-	rm -f tests/*.hd.c samples/*.hd.c
+	rm -f tests/*.hd.c samples/*.hd.c tests/*.hd.s samples/*.hd.s

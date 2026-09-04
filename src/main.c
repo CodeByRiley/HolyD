@@ -8,6 +8,8 @@
 #include "eval.h"
 #include "ffi.h"
 #include "parser/parser.h"
+#include "emit_asm.h"
+#include "resolve.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -285,10 +287,14 @@ int test(const char *dir) {
       printf("holyd: failed to parse %s\n", full_path);
       failure++;
     } else {
+      HDResolution resolution;
       HDProgram bytecode;
       HDProgramInit(&bytecode);
 
-      if (!HDCompileProgram(program, &bytecode)) {
+      if (!HDResolveProgram(program, &resolution)) {
+        printf("holyd: failed to resolve %s\n", full_path);
+        failure++;
+      } else if (!HDCompileProgram(program, &resolution, &bytecode)) {
         printf("holyd: failed to compile %s\n", full_path);
         failure++;
       } else if (!HDRunProgram(&bytecode)) {
@@ -298,6 +304,7 @@ int test(const char *dir) {
         printf("holyd: passed %s\n", full_path);
         success++;
       }
+      HDResolutionFree(&resolution);
     }
 
     free(source);
@@ -321,6 +328,10 @@ static void print_usage(void) {
          HOLYD_DEFAULT_TEST_DIR "/)");
   printf("  %-16s %s\n", "-tokens", "Print the token stream and exit");
   printf("  %-16s %s\n", "-ast", "Print the parsed AST and exit");
+  printf("  %-16s %s\n", "--dump-symbols",
+         "Print resolved names and frame slots, then exit");
+  printf("  %-16s %s\n", "--emit-asm",
+         "Translate to x86-64 assembly instead of running it");
   printf("  %-16s %s\n", "--interpret", "Walk the AST instead of running bytecode");
   printf("  %-16s %s\n", "--dump-bytecode", "Disassemble the program before running it");
   printf("  %-16s %s\n", "--emit-c [-o]", "Write runnable C source and exit");
@@ -383,8 +394,10 @@ int main(int argc, char **argv) {
   int dump_bytecode = 0;
   int tokens_only = 0;
   int ast_only = 0;
+  int dump_symbols = 0;
   int run_tests = 0;
   int emit_c = 0;
+  int emit_asm = 0;
   const char *output_path = NULL;
   const char *source_path = NULL;
 
@@ -418,6 +431,14 @@ int main(int argc, char **argv) {
     }
     if (strcmp(arg, "-ast") == 0) {
       ast_only = 1;
+      continue;
+    }
+    if (strcmp(arg, "--emit-asm") == 0) {
+      emit_asm = 1;
+      continue;
+    }
+    if (strcmp(arg, "--dump-symbols") == 0) {
+      dump_symbols = 1;
       continue;
     }
     if (strcmp(arg, "--emit-c") == 0) {
@@ -500,9 +521,24 @@ int main(int argc, char **argv) {
     return 0;
   }
 
-  if (emit_c) {
+  HDResolution resolution;
+  if (!HDResolveProgram(program, &resolution)) {
+    HDResolutionFree(&resolution);
+    free(source);
+    return 1;
+  }
+
+  if (dump_symbols) {
+    HDResolutionPrint(&resolution);
+    HDResolutionFree(&resolution);
+    free(source);
+    return 0;
+  }
+
+  if (emit_c || emit_asm) {
     /* Default output name is the source with its extension swapped, so
-     * `holyd --emit-c samples/gui.hd` lands at samples/gui.c. */
+     * `holyd --emit-c samples/gui.hd` lands at samples/gui.c, and
+     * `--emit-asm` on the same file lands at samples/gui.s. */
     char *derived = NULL;
     const char *target = output_path;
     if (target == NULL) {
@@ -510,11 +546,12 @@ int main(int argc, char **argv) {
       derived = malloc(len + 3); /* ".hd" -> ".c" never grows, but be safe */
       if (derived == NULL) {
         printf("Error: out of memory choosing an output name.\n");
+        HDResolutionFree(&resolution);
         free(source);
         return 1;
       }
       memcpy(derived, source_path, len - 2);
-      derived[len - 2] = 'c';
+      derived[len - 2] = emit_asm ? 's' : 'c';
       derived[len - 1] = '\0';
       target = derived;
     }
@@ -523,16 +560,19 @@ int main(int argc, char **argv) {
     if (out == NULL) {
       printf("Error: could not open '%s' for writing\n", target);
       free(derived);
+      HDResolutionFree(&resolution);
       free(source);
       return 1;
     }
 
-    int ok = HDEmitC(program, out, source_path);
+    int ok = emit_asm ? HDEmitAsm(program, &resolution, out, source_path)
+                      : HDEmitC(program, &resolution, out, source_path);
     fclose(out);
     if (ok) {
       printf("holyd: wrote %s\n", target);
     }
     free(derived);
+    HDResolutionFree(&resolution);
     free(source);
     return ok ? 0 : 1;
   }
@@ -549,7 +589,8 @@ int main(int argc, char **argv) {
   } else {
     HDProgram bytecode;
     HDProgramInit(&bytecode);
-    if (!HDCompileProgram(program, &bytecode)) {
+    if (!HDCompileProgram(program, &resolution, &bytecode)) {
+      HDResolutionFree(&resolution);
       free(source);
       return 1;
     }
@@ -557,11 +598,13 @@ int main(int argc, char **argv) {
       HDDumpProgram(&bytecode);
     }
     if (!HDRunProgram(&bytecode)) {
+      HDResolutionFree(&resolution);
       free(source);
       return 1;
     }
   }
 
+  HDResolutionFree(&resolution);
   free(source);
   return 0;
 }

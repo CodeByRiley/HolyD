@@ -1,4 +1,5 @@
 #include "eval.h"
+#include "runtime.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -157,6 +158,15 @@ static HDValue EvalExpression(ASTNode* node, Environment* env) {
                 default: break;
             }
             break;
+        }
+
+        case AST_TERNARY_OP: {
+            HDValue condition =
+                EvalExpression(node->as.ternary_op.condition, env);
+            if (HDTruthy(condition)) {
+                return EvalExpression(node->as.ternary_op.true_expr, env);
+            }
+            return EvalExpression(node->as.ternary_op.false_expr, env);
         }
 
         case AST_CALL: {
@@ -324,6 +334,19 @@ HDValue EvalNode(ASTNode* node, Environment* env) {
                 node->as.index_assignment.value, env);
             break;
         }
+
+        /* Marks a point the tree walker has no way to return to: it runs
+         * the AST by recursion, so a jump would have to unwind out of every
+         * enclosing node and then find its way back in. The two paths that
+         * difftest holds to each other , the VM and the C backend , both
+         * implement goto; this one predates them, like its missing FFI. */
+        case AST_LABEL:
+            break;
+
+        case AST_GOTO:
+            printf("Runtime error: goto is not supported by the tree walker; "
+                   "run without --interpret.\n");
+            exit(1);
 
         default:
             // Try evaluating as an expression (e.g. a standalone "5 + 5;")

@@ -68,6 +68,34 @@ ASTNode* ASTNewUnaryOp(TokenType op, ASTNode* operand) {
     return node;
 }
 
+ASTNode* ASTNewTernaryOp(ASTNode* condition, ASTNode* true_expr,
+                         ASTNode* false_expr) {
+    ASTNode* node = (ASTNode*)malloc(sizeof(ASTNode));
+    node->type = AST_TERNARY_OP;
+    node->as.ternary_op.condition = condition;
+    node->as.ternary_op.true_expr = true_expr;
+    node->as.ternary_op.false_expr = false_expr;
+    return node;
+}
+
+/* A label names a point in its function, not a value, so it carries only
+ * the name. Which point it names is a question for the resolver. */
+ASTNode* ASTNewLabel(const char* name, int len) {
+    ASTNode* node = (ASTNode*)malloc(sizeof(ASTNode));
+    node->type = AST_LABEL;
+    node->as.label.name = name;
+    node->as.label.len = len;
+    return node;
+}
+
+ASTNode* ASTNewGoto(const char* target, int len) {
+    ASTNode* node = (ASTNode*)malloc(sizeof(ASTNode));
+    node->type = AST_GOTO;
+    node->as.goto_statement.target = target;
+    node->as.goto_statement.target_len = len;
+    return node;
+}
+
 ASTNode* ASTNewIndex(ASTNode* target, ASTNode* index) {
     ASTNode* node = (ASTNode*)malloc(sizeof(ASTNode));
     node->type = AST_INDEX;
@@ -254,6 +282,15 @@ void ASTPrint(const ASTNode* node, int indent) {
             ASTPrintChild("OPERAND", node->as.unary_op.operand, indent + 1);
             break;
 
+        case AST_TERNARY_OP:
+            fputs("TERNARY_OP\n", stdout);
+            ASTPrintChild("CONDITION", node->as.ternary_op.condition,
+                          indent + 1);
+            ASTPrintChild("TRUE", node->as.ternary_op.true_expr, indent + 1);
+            ASTPrintChild("FALSE", node->as.ternary_op.false_expr,
+                          indent + 1);
+            break;
+
         case AST_CALL:
             printf("CALL %.*s\n", node->as.call.callee_name_length,
                    node->as.call.callee_name);
@@ -318,7 +355,6 @@ void ASTPrint(const ASTNode* node, int indent) {
             }
             ASTPrintChild("BODY", node->as.for_statement.body, indent + 1);
             break;
-
         case AST_FOREACH:
             printf("FOREACH_STATEMENT value=%.*s",
                    node->as.foreach_statement.variable_name_length,
@@ -360,6 +396,15 @@ void ASTPrint(const ASTNode* node, int indent) {
                                      indent + 2);
             }
             ASTPrintChild("BODY", node->as.function_decl.body, indent + 1);
+            break;
+
+        case AST_LABEL:
+            printf("LABEL %.*s\n", node->as.label.len, node->as.label.name);
+            break;
+
+        case AST_GOTO:
+            printf("GOTO %.*s\n", node->as.goto_statement.target_len,
+                   node->as.goto_statement.target);
             break;
 
         case AST_RETURN:

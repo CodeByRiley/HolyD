@@ -163,6 +163,7 @@ static Token identifier(Lexer* lexer) {
         if (string_match(lexer->start, "bool", 4)) return make_token(lexer, TOKEN_BOOL);
         if (string_match(lexer->start, "lazy", 4)) return make_token(lexer, TOKEN_LAZY);
         if (string_match(lexer->start, "else", 4)) return make_token(lexer, TOKEN_ELSE);
+        if (string_match(lexer->start, "goto", 4)) return make_token(lexer, TOKEN_GOTO);
         break;
       case 5:
         if (string_match(lexer->start, "ulong", 5)) return make_token(lexer, TOKEN_ULONG);
@@ -227,6 +228,7 @@ Token LexerNextToken(Lexer* lexer) {
         case ']': return make_token(lexer, TOKEN_RBRACKET);
         case ';': return make_token(lexer, TOKEN_SEMICOLON);
         case ':': return make_token(lexer, TOKEN_COLON);
+        case '?': return make_token(lexer, TOKEN_QUESTION);
         case ',': return make_token(lexer, TOKEN_COMMA);
         /* Longest run wins throughout: every operator that is a prefix of a
          * longer one has to test for the longer one first, or `>>>=` lexes
@@ -325,6 +327,7 @@ const char* TokenTypeToString(TokenType type) {
         case TOKEN_ELSE: return "ELSE";
         case TOKEN_WHILE: return "WHILE";
         case TOKEN_RETURN: return "RETURN";
+        case TOKEN_GOTO: return "GOTO";
         case TOKEN_TRUE: return "TRUE";
         case TOKEN_FALSE: return "FALSE";
         case TOKEN_MODULE: return "MODULE";
@@ -380,6 +383,7 @@ const char* TokenTypeToString(TokenType type) {
         case TOKEN_GTEQ: return "GTEQ";
         case TOKEN_SEMICOLON: return "SEMICOLON";
         case TOKEN_COLON: return "COLON";
+        case TOKEN_QUESTION: return "QUESTION";
         case TOKEN_COMMA: return "COMMA";
         case TOKEN_DOT: return "DOT";
         case TOKEN_DOTDOT: return "DOTDOT";

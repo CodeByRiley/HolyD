@@ -1,0 +1,114 @@
+/* Labels and goto.
+ *
+ * A label is declared `.name:` , the dot is what lets the parser tell a jump
+ * target from a statement that happens to start with a name. A jump to it is
+ * spelled `goto name;`.
+ *
+ * A label belongs to the function that declares it, and a goto may land
+ * anywhere in that same function, including inside a loop body. The one
+ * place it may not land is inside a `foreach` body it is not already in:
+ * that lowering declares a loop counter on entry, and jumping past that
+ * would leave the loop reading a counter nothing set.
+ *
+ * tools/difftest.sh runs this on the VM and transpiled, and the two have to
+ * agree. `--interpret` refuses goto outright; the tree walker has no way to
+ * return to a point it has already unwound past.
+ */
+
+/* Backward, at the top level. */
+I64 spins = 0;
+.again:
+spins = spins + 1;
+if (spins < 5) goto again;
+PrintLn("top level looped ", spins, " times");
+
+/* Forward, skipping the statements in between. */
+U0 Skip() {
+    I64 n = 1;
+    goto after;
+    n = 999;
+    .after:
+    PrintLn("  forward jump left n = ", n);
+}
+
+/* What goto is actually for here: leaving two loops at once, which is what
+ * a language without `break` otherwise has to fake with a flag variable. */
+I64 FindPair(I64 target) {
+    I64 found = -1;
+    for (I64 a = 1; a <= 4; a++) {
+        for (I64 b = 1; b <= 4; b++) {
+            if (a * b == target) {
+                found = a * 10 + b;
+                goto matched;
+            }
+        }
+    }
+    .matched:
+    return found;
+}
+
+/* Landing inside a loop body, past its head. */
+U0 IntoLoop() {
+    I64 k = 0;
+    goto middle;
+    while (k < 3) {
+        PrintLn("  head k=", k);
+        .middle:
+        PrintLn("  middle k=", k);
+        k = k + 1;
+    }
+}
+
+/* Within one foreach turn, and out of the loop entirely. Both are allowed;
+ * jumping *into* the body from outside is not. */
+U0 Loops() {
+    foreach (v; [1, 2, 3]) {
+        if (v == 2) goto next;
+        PrintLn("  saw ", v);
+        .next:
+        PrintLn("  end of turn ", v);
+    }
+
+    foreach (w; [7, 8, 9]) {
+        if (w == 8) goto leave;
+        PrintLn("  before leaving: ", w);
+    }
+    PrintLn("  loop ran out on its own");
+
+    .leave:
+    PrintLn("  left the loop early");
+}
+
+/* A label may be the last thing in a function. */
+U0 EndsOnALabel() {
+    goto finish;
+    PrintLn("  never printed");
+    .finish:
+}
+
+/* Each function has its own labels, so the same name means a different
+ * point in each, and neither can jump to the other's. */
+U0 Own() {
+    goto here;
+    .here:
+    PrintLn("  Own reached its own 'here'");
+}
+
+U0 main() {
+    Skip();
+
+    PrintLn("pairs:");
+    PrintLn("  12 -> ", FindPair(12));
+    PrintLn("  16 -> ", FindPair(16));
+    PrintLn("  99 -> ", FindPair(99));
+
+    PrintLn("into a loop:");
+    IntoLoop();
+
+    PrintLn("foreach:");
+    Loops();
+
+    PrintLn("edges:");
+    EndsOnALabel();
+    Own();
+}

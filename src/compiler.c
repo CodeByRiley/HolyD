@@ -1,12 +1,21 @@
 #include "compiler.h"
-#include "runtime.h"
 #include "ffi.h"
+#include "runtime.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 typedef struct {
   HDProgram *program;
+  const HDResolution *resolution;
+
+  LabelSymbol *labels;
+  int label_count;
+  int label_capacity;
+
+  PendingGoto *pending_gotos;
+  int pending_count;
+  int pending_capacity;
 } Compiler;
 
 static void chunk_init(BytecodeChunk *chunk) {
@@ -15,7 +24,101 @@ static void chunk_init(BytecodeChunk *chunk) {
   chunk->capacity = 0;
 }
 
+static void init_label_scope(Compiler *c) {
+  c->labels = NULL;
+  c->label_count = 0;
+  c->label_capacity = 0;
+
+  c->pending_gotos = NULL;
+  c->pending_count = 0;
+  c->pending_capacity = 0;
+}
+
+/* Patches the jumps that were emitted before their label was reached, then
+ * empties the scope for the next chunk. Every chunk , each function body and
+ * the top level , gets its own, which is what confines a jump to one frame.
+ *
+ * A pending goto with no label cannot happen: the resolver rejected that
+ * before any of this ran. It is still checked, because the alternative to
+ * checking is jumping to address -1. */
+static void resolve_and_free_label_scope(Compiler *c, BytecodeChunk *chunk) {
+  for (int i = 0; i < c->pending_count; i++) {
+    PendingGoto *pending = &c->pending_gotos[i];
+    int target_ip = -1;
+
+    for (int j = 0; j < c->label_count; j++) {
+      if (c->labels[j].label_index == pending->label_index) {
+        target_ip = c->labels[j].target_ip;
+        break;
+      }
+    }
+
+    if (target_ip < 0) {
+      const HDLabel *label =
+          HDResolutionLabel(c->resolution, pending->label_index);
+      printf("Compile error: no address for label '%.*s'.\n",
+             label ? label->name_length : 0, label ? label->name : "");
+      c->program->had_error = 1;
+    } else {
+      chunk->code[pending->jump_at].operand = target_ip;
+    }
+  }
+
+  free(c->labels);
+  free(c->pending_gotos);
+  init_label_scope(c);
+}
+
+/* A label emits nothing. It records where the next instruction will land, so
+ * that a jump to it lands there. */
+static void declare_label(Compiler *c, BytecodeChunk *chunk, int label_index) {
+  if (c->label_count >= c->label_capacity) {
+    int capacity = c->label_capacity ? c->label_capacity * 2 : 8;
+    LabelSymbol *grown = (LabelSymbol *)realloc(
+        c->labels, sizeof(LabelSymbol) * (size_t)capacity);
+    if (!grown) {
+      printf("Compile error: out of memory while recording a label.\n");
+      c->program->had_error = 1;
+      return;
+    }
+    c->labels = grown;
+    c->label_capacity = capacity;
+  }
+  LabelSymbol *label = &c->labels[c->label_count++];
+  label->label_index = label_index;
+  label->target_ip = chunk->count;
+}
+
+static int find_label_ip(Compiler *c, int label_index) {
+  for (int i = 0; i < c->label_count; i++) {
+    if (c->labels[i].label_index == label_index)
+      return c->labels[i].target_ip;
+  }
+  return -1;
+}
+
+static void add_pending_goto(Compiler *c, int label_index, int jump_at) {
+  if (c->pending_count >= c->pending_capacity) {
+    int capacity = c->pending_capacity ? c->pending_capacity * 2 : 8;
+    PendingGoto *grown = (PendingGoto *)realloc(
+        c->pending_gotos, sizeof(PendingGoto) * (size_t)capacity);
+    if (!grown) {
+      printf("Compile error: out of memory while recording a goto.\n");
+      c->program->had_error = 1;
+      return;
+    }
+    c->pending_gotos = grown;
+    c->pending_capacity = capacity;
+  }
+  PendingGoto *pending = &c->pending_gotos[c->pending_count++];
+  pending->label_index = label_index;
+  pending->jump_at = jump_at;
+}
+
+
+
 void HDProgramInit(HDProgram *program) {
+  program->global_slot_count = 0;
   chunk_init(&program->main);
   program->functions = NULL;
   program->function_count = 0;
@@ -55,6 +158,7 @@ static Instruction make_ins(BytecodeOp op) {
   ins.text = NULL;
   ins.text_len = 0;
   ins.operand = 0;
+  ins.fallback = -1;
   return ins;
 }
 
@@ -121,6 +225,49 @@ static char *make_temp_name(Compiler *compiler, const char *suffix) {
 static void compile_error(Compiler *compiler, const char *message) {
   printf("Compile error: %s\n", message);
   compiler->program->had_error = 1;
+}
+
+/* What a node names in the role it appears in, or NULL when the resolver
+ * recorded nothing for it. NULL is not an error: the foreach lowering below
+ * invents temporaries the resolver never saw, and those keep the name-keyed
+ * path. */
+static const HDSymbol *symbol_for(Compiler *compiler, const ASTNode *node,
+                                  HDBindingRole role) {
+  const HDBinding *binding =
+      HDResolutionBinding(compiler->resolution, node, role);
+  if (!binding)
+    return NULL;
+  return HDResolutionSymbol(compiler->resolution, binding->symbol_id);
+}
+
+/* The global slot a local defers to while its own is inactive, or -1. The
+ * rest of the chain is the name, which every instruction carries anyway. */
+static int fallback_slot(Compiler *compiler, const HDSymbol *symbol) {
+  const HDSymbol *fallback =
+      HDResolutionSymbol(compiler->resolution, symbol->fallback_id);
+  if (fallback && fallback->storage == HD_SYMBOL_GLOBAL)
+    return fallback->slot;
+  return -1;
+}
+
+/* One instruction for a name, picking the frame from where the resolver put
+ * it. A name the resolver left external , an FFI constant a script only
+ * reads , has no slot anywhere and keeps the Environment path. */
+static void emit_variable(Compiler *compiler, BytecodeChunk *chunk,
+                          const HDSymbol *symbol, BytecodeOp local_op,
+                          BytecodeOp global_op, BytecodeOp name_op,
+                          const char *name, int name_length) {
+  if (!symbol || symbol->storage == HD_SYMBOL_EXTERNAL) {
+    emit_text(chunk, name_op, name, name_length);
+    return;
+  }
+  Instruction ins =
+      make_ins(symbol->storage == HD_SYMBOL_LOCAL ? local_op : global_op);
+  ins.text = name;
+  ins.text_len = name_length;
+  ins.operand = symbol->slot;
+  ins.fallback = fallback_slot(compiler, symbol);
+  emit(chunk, ins);
 }
 
 static int is_name(const char *a, int a_len, const char *b) {
@@ -229,7 +376,6 @@ static void compile_binary_op(Compiler *compiler, BytecodeChunk *chunk,
     compile_logical(compiler, chunk, node, op == TOKEN_ANDAND);
     return;
   }
-
   compile_expression(compiler, chunk, node->as.binary_op.left);
   compile_expression(compiler, chunk, node->as.binary_op.right);
 
@@ -325,7 +471,10 @@ static void compile_expression(Compiler *compiler, BytecodeChunk *chunk,
   }
 
   case AST_VAR_REF:
-    emit_text(chunk, BC_VARIABLE_LOAD, node->as.variable_ref.name, node->as.variable_ref.name_length);
+    emit_variable(compiler, chunk, symbol_for(compiler, node, HD_BINDING_READ),
+                  BC_LOCAL_LOAD, BC_GLOBAL_LOAD, BC_VARIABLE_LOAD,
+                  node->as.variable_ref.name,
+                  node->as.variable_ref.name_length);
     break;
 
   case AST_BINARY_OP:
@@ -348,7 +497,16 @@ static void compile_expression(Compiler *compiler, BytecodeChunk *chunk,
       emit_int(chunk, 0);
     }
     break;
-
+  case AST_TERNARY_OP: {
+    compile_expression(compiler, chunk, node->as.ternary_op.condition);
+    int false_jump = emit_jump(chunk, BC_FLOW_JUMP_IF_FALSE);
+    compile_expression(compiler, chunk, node->as.ternary_op.true_expr);
+    int end_jump = emit_jump(chunk, BC_FLOW_JUMP);
+    patch_jump(chunk, false_jump);
+    compile_expression(compiler, chunk, node->as.ternary_op.false_expr);
+    patch_jump(chunk, end_jump);
+    break;
+  }
   case AST_INDEX:
     compile_expression(compiler, chunk, node->as.index_expr.target);
     compile_expression(compiler, chunk, node->as.index_expr.index);
@@ -361,7 +519,8 @@ static void compile_expression(Compiler *compiler, BytecodeChunk *chunk,
     break;
 
   case AST_CALL:
-    if (is_name(node->as.call.callee_name, node->as.call.callee_name_length, "[array]")) {
+    if (is_name(node->as.call.callee_name, node->as.call.callee_name_length,
+                "[array]")) {
       for (int i = 0; i < node->as.call.argument_count; i++) {
         compile_expression(compiler, chunk, node->as.call.arguments[i]);
       }
@@ -372,9 +531,9 @@ static void compile_expression(Compiler *compiler, BytecodeChunk *chunk,
     for (int i = 0; i < node->as.call.argument_count; i++) {
       compile_expression(compiler, chunk, node->as.call.arguments[i]);
     }
-    emit_call(chunk, node->as.call.callee_name, node->as.call.callee_name_length, node->as.call.argument_count);
+    emit_call(chunk, node->as.call.callee_name,
+              node->as.call.callee_name_length, node->as.call.argument_count);
     break;
-
   default:
     compile_error(compiler, "statement used where an expression was expected.");
     emit_int(chunk, 0);
@@ -400,7 +559,8 @@ static void compile_foreach(Compiler *compiler, BytecodeChunk *chunk,
     return;
   }
 
-  compile_expression(compiler, chunk, node->as.foreach_statement.array_expression);
+  compile_expression(compiler, chunk,
+                     node->as.foreach_statement.array_expression);
   emit_text(chunk, BC_VARIABLE_DEFINE, array_name, (int)strlen(array_name));
   emit_int(chunk, 0);
   emit_text(chunk, BC_VARIABLE_DEFINE, index_name, (int)strlen(index_name));
@@ -415,13 +575,19 @@ static void compile_foreach(Compiler *compiler, BytecodeChunk *chunk,
   emit_text(chunk, BC_VARIABLE_LOAD, array_name, (int)strlen(array_name));
   emit_text(chunk, BC_VARIABLE_LOAD, index_name, (int)strlen(index_name));
   emit_simple(chunk, BC_ARRAY_GET);
-  emit_text(chunk, BC_VARIABLE_DEFINE,
-            node->as.foreach_statement.variable_name,
-            node->as.foreach_statement.variable_name_length);
+  emit_variable(compiler, chunk,
+                symbol_for(compiler, node, HD_BINDING_FOREACH_VALUE),
+                BC_LOCAL_DEFINE, BC_GLOBAL_DEFINE, BC_VARIABLE_DEFINE,
+                node->as.foreach_statement.variable_name,
+                node->as.foreach_statement.variable_name_length);
 
   if (node->as.foreach_statement.index_name != NULL) {
     emit_text(chunk, BC_VARIABLE_LOAD, index_name, (int)strlen(index_name));
-    emit_text(chunk, BC_VARIABLE_DEFINE, node->as.foreach_statement.index_name, node->as.foreach_statement.index_name_length);
+    emit_variable(compiler, chunk,
+                  symbol_for(compiler, node, HD_BINDING_FOREACH_INDEX),
+                  BC_LOCAL_DEFINE, BC_GLOBAL_DEFINE, BC_VARIABLE_DEFINE,
+                  node->as.foreach_statement.index_name,
+                  node->as.foreach_statement.index_name_length);
   }
 
   compile_statement(compiler, chunk, node->as.foreach_statement.body);
@@ -445,14 +611,17 @@ static void compile_statement(Compiler *compiler, BytecodeChunk *chunk,
   switch (node->type) {
   case AST_VAR_DECL:
     compile_expression(compiler, chunk, node->as.variable_decl.initializer);
-    emit_text(chunk, BC_VARIABLE_DEFINE, node->as.variable_decl.name,
-              node->as.variable_decl.name_length);
+    emit_variable(
+        compiler, chunk, symbol_for(compiler, node, HD_BINDING_DECLARATION),
+        BC_LOCAL_DEFINE, BC_GLOBAL_DEFINE, BC_VARIABLE_DEFINE,
+        node->as.variable_decl.name, node->as.variable_decl.name_length);
     break;
 
   case AST_ASSIGN:
     compile_expression(compiler, chunk, node->as.assignment.value);
-    emit_text(chunk, BC_VARIABLE_STORE, node->as.assignment.name,
-              node->as.assignment.name_length);
+    emit_variable(compiler, chunk, symbol_for(compiler, node, HD_BINDING_WRITE),
+                  BC_LOCAL_STORE, BC_GLOBAL_STORE, BC_VARIABLE_STORE,
+                  node->as.assignment.name, node->as.assignment.name_length);
     break;
 
   /* Array, index, value -> BC_ARRAY_SET. Elements are reached through
@@ -548,7 +717,29 @@ static void compile_statement(Compiler *compiler, BytecodeChunk *chunk,
     }
     emit_simple(chunk, BC_STACK_POP);
     break;
+  case AST_LABEL:
+    declare_label(compiler, chunk,
+                  HDResolutionLabelIndex(compiler->resolution, node));
+    break;
 
+  /* A backward jump has its address already; a forward one waits for the
+   * chunk to be finished and is patched then. */
+  case AST_GOTO: {
+    int label_index = HDResolutionGotoLabel(compiler->resolution, node);
+    if (label_index < 0) {
+      compile_error(compiler, "goto was not resolved to a label.");
+      break;
+    }
+    int target_ip = find_label_ip(compiler, label_index);
+    if (target_ip >= 0) {
+      Instruction jump = make_ins(BC_FLOW_JUMP);
+      jump.operand = target_ip;
+      emit(chunk, jump);
+    } else {
+      add_pending_goto(compiler, label_index, emit_jump(chunk, BC_FLOW_JUMP));
+    }
+    break;
+  }
   default:
     compile_expression(compiler, chunk, node);
     emit_simple(chunk, BC_STACK_POP);
@@ -556,7 +747,8 @@ static void compile_statement(Compiler *compiler, BytecodeChunk *chunk,
   }
 }
 
-static HDFunction *add_function(HDProgram *program, ASTNode *node) {
+static HDFunction *add_function(Compiler *compiler, ASTNode *node) {
+  HDProgram *program = compiler->program;
   if (program->function_count >= program->function_capacity) {
     int new_capacity =
         program->function_capacity ? program->function_capacity * 2 : 8;
@@ -575,32 +767,55 @@ static HDFunction *add_function(HDProgram *program, ASTNode *node) {
   fn->name_len = node->as.function_decl.name_length;
   fn->parameters = node->as.function_decl.parameters;
   fn->param_count = node->as.function_decl.parameter_count;
+  fn->param_slots = NULL;
+  fn->frame_slot_count = 0;
   chunk_init(&fn->chunk);
+
+  int scope = HDResolutionFunctionIndex(compiler->resolution, node);
+  if (scope >= 0) {
+    fn->param_slots = compiler->resolution->functions[scope].parameter_slots;
+    fn->frame_slot_count =
+        compiler->resolution->functions[scope].frame_slot_count;
+  }
   return fn;
 }
 
-int HDCompileProgram(ASTNode *ast, HDProgram *program) {
-  Compiler compiler;
-  compiler.program = program;
+int HDCompileProgram(ASTNode *ast, const HDResolution *resolution,
+                     HDProgram *program) {
+  Compiler compiler = {
+      .resolution = resolution,
+      .program = program,
+  };
 
   if (!ast || ast->type != AST_BLOCK) {
     compile_error(&compiler, "program root is not a block.");
     return 0;
   }
 
+  program->global_slot_count = resolution->global_slot_count;
+
   for (int i = 0; i < ast->as.block.statement_count; i++) {
     ASTNode *stmt = ast->as.block.statements[i];
     if (stmt && stmt->type == AST_FUNC_DECL) {
-      HDFunction *fn = add_function(program, stmt);
+      HDFunction *fn = add_function(&compiler, stmt);
       if (!fn) {
         compile_error(&compiler, "out of memory while adding function.");
         return 0;
       }
+
+      // Fresh label scope for THIS function
+      init_label_scope(&compiler);
+
       compile_statement(&compiler, &fn->chunk, stmt->as.function_decl.body);
       emit_int(&fn->chunk, 0);
       emit_simple(&fn->chunk, BC_FUNCTION_RETURN);
+
+      // Patch forward gotos & clean up labels for THIS function
+      resolve_and_free_label_scope(&compiler, &fn->chunk);
     }
   }
+
+  init_label_scope(&compiler); // Fresh label scope for top-level code
 
   for (int i = 0; i < ast->as.block.statement_count; i++) {
     ASTNode *stmt = ast->as.block.statements[i];
@@ -610,7 +825,6 @@ int HDCompileProgram(ASTNode *ast, HDProgram *program) {
       continue;
     compile_statement(&compiler, &program->main, stmt);
   }
-
   /* Run the entry point after the top-level statements, so the globals a
    * file declares above its functions are defined by the time main() reads
    * them.
@@ -637,7 +851,7 @@ int HDCompileProgram(ASTNode *ast, HDProgram *program) {
 
   emit_int(&program->main, 0);
   emit_simple(&program->main, BC_FUNCTION_RETURN);
-
+  resolve_and_free_label_scope(&compiler, &program->main);
   return !program->had_error;
 }
 
@@ -670,10 +884,33 @@ static HDFunction *find_function(HDProgram *program, const char *name,
   return NULL;
 }
 
+/* One frame per activation: the globals get one for the whole run, each
+ * call gets its own. `active` is what keeps a declaration from taking effect
+ * before it executes , an inactive slot means the name still belongs to
+ * whatever the enclosing scope makes of it. */
+typedef struct {
+  HDValue *slots;
+  unsigned char *active;
+  int count;
+} HDFrame;
+
+/* Frames this size or smaller live on the C stack, which covers every
+ * function in tests/ and keeps recursion off malloc. */
+#define HD_FRAME_INLINE 32
+
 typedef struct {
   HDProgram *program;
   Environment *globals;
+  HDFrame global_frame;
 } VM;
+
+static int frame_active(const HDFrame *frame, int slot) {
+  return frame && slot >= 0 && slot < frame->count && frame->active[slot];
+}
+
+static int frame_holds(const HDFrame *frame, int slot) {
+  return frame && slot >= 0 && slot < frame->count;
+}
 
 /* The VM's opcodes and the runtime's operator enum are separate so that
  * generated C never has to include the bytecode definitions. One switch
@@ -723,7 +960,7 @@ static HDBinOp binop_for(BytecodeOp op) {
 }
 
 static int run_chunk(VM *vm, BytecodeChunk *chunk, Environment *env,
-                     HDValue *out);
+                     HDFrame *frame, HDValue *out);
 
 static int call_function(VM *vm, Instruction *ins, HDValue *stack, int *sp) {
   int add_newline = 0;
@@ -768,18 +1005,56 @@ static int call_function(VM *vm, Instruction *ins, HDValue *stack, int *sp) {
     return 0;
   }
 
+  /* The environment survives the move to slots because the foreach lowering
+   * still names its temporaries, and because an inactive slot falls back to
+   * a name lookup that has to reach the globals. */
   Environment local;
   EnvInitChild(&local, vm->globals);
 
+  HDValue inline_slots[HD_FRAME_INLINE];
+  unsigned char inline_active[HD_FRAME_INLINE];
+  HDValue *heap_slots = NULL;
+  unsigned char *heap_active = NULL;
+
+  HDFrame frame;
+  frame.count = fn->frame_slot_count;
+  if (frame.count <= HD_FRAME_INLINE) {
+    frame.slots = inline_slots;
+    frame.active = inline_active;
+  } else {
+    heap_slots = (HDValue *)malloc(sizeof(HDValue) * (size_t)frame.count);
+    heap_active = (unsigned char *)malloc((size_t)frame.count);
+    if (!heap_slots || !heap_active) {
+      free(heap_slots);
+      free(heap_active);
+      printf("Runtime error: out of memory calling '%.*s'.\n", fn->name_len,
+             fn->name);
+      return 0;
+    }
+    frame.slots = heap_slots;
+    frame.active = heap_active;
+  }
+  if (frame.count > 0)
+    memset(frame.active, 0, (size_t)frame.count);
+
+  /* Parameters are the one kind of local bound before the body runs. Two
+   * parameters of the same name share a slot, so writing them in order
+   * leaves the later one holding it, as repeated EnvDefine calls did. */
   int first = *sp - ins->operand;
   for (int i = 0; i < fn->param_count; i++) {
-    EnvDefine(&local, fn->parameters[i].name,
-              (size_t)fn->parameters[i].name_length, stack[first + i]);
+    int slot = fn->param_slots ? fn->param_slots[i] : i;
+    if (!frame_holds(&frame, slot))
+      continue;
+    frame.slots[slot] = stack[first + i];
+    frame.active[slot] = 1;
   }
   *sp = first;
 
   HDValue result = int_value(0);
-  if (!run_chunk(vm, &fn->chunk, &local, &result))
+  int ok = run_chunk(vm, &fn->chunk, &local, &frame, &result);
+  free(heap_slots);
+  free(heap_active);
+  if (!ok)
     return 0;
   stack[(*sp)++] = result;
   return 1;
@@ -804,7 +1079,7 @@ static int push_value(HDValue *stack, int *sp, HDValue value) {
 }
 
 static int run_chunk(VM *vm, BytecodeChunk *chunk, Environment *env,
-                     HDValue *out) {
+                     HDFrame *frame, HDValue *out) {
   HDValue stack[256];
   int sp = 0;
   int ip = 0;
@@ -852,6 +1127,78 @@ static int run_chunk(VM *vm, BytecodeChunk *chunk, Environment *env,
         return 0;
       EnvSet(env, ins->text, (size_t)ins->text_len, value);
       break;
+
+    /* Read down the chain the resolver recorded: this frame, then the
+     * global of the same name, then the Environment, which is where the FFI
+     * constants are and where an undefined name is finally an error. */
+    case BC_LOCAL_LOAD:
+    case BC_GLOBAL_LOAD: {
+      HDFrame *own = ins->op == BC_LOCAL_LOAD ? frame : &vm->global_frame;
+      if (frame_active(own, ins->operand)) {
+        if (!push_value(stack, &sp, own->slots[ins->operand]))
+          return 0;
+        break;
+      }
+      if (frame_active(&vm->global_frame, ins->fallback)) {
+        if (!push_value(stack, &sp, vm->global_frame.slots[ins->fallback]))
+          return 0;
+        break;
+      }
+      HDValue *found = EnvGet(env, ins->text, (size_t)ins->text_len);
+      if (!found) {
+        printf("Runtime error: undefined variable '%.*s'.\n", ins->text_len,
+               ins->text);
+        return 0;
+      }
+      if (!push_value(stack, &sp, *found))
+        return 0;
+      break;
+    }
+
+    /* A declaration binds its own slot whatever else the name meant. */
+    case BC_LOCAL_DEFINE:
+    case BC_GLOBAL_DEFINE: {
+      if (!pop_value(stack, &sp, &value))
+        return 0;
+      HDFrame *own = ins->op == BC_LOCAL_DEFINE ? frame : &vm->global_frame;
+      if (!frame_holds(own, ins->operand)) {
+        printf("Runtime error: no slot for '%.*s'.\n", ins->text_len,
+               ins->text);
+        return 0;
+      }
+      own->slots[ins->operand] = value;
+      own->active[ins->operand] = 1;
+      break;
+    }
+
+    /* An assignment writes to whatever the name already means, and only
+     * binds a new slot when the name means nothing yet. */
+    case BC_LOCAL_STORE:
+    case BC_GLOBAL_STORE: {
+      if (!pop_value(stack, &sp, &value))
+        return 0;
+      HDFrame *own = ins->op == BC_LOCAL_STORE ? frame : &vm->global_frame;
+      if (frame_active(own, ins->operand)) {
+        own->slots[ins->operand] = value;
+        break;
+      }
+      if (frame_active(&vm->global_frame, ins->fallback)) {
+        vm->global_frame.slots[ins->fallback] = value;
+        break;
+      }
+      if (EnvGet(env, ins->text, (size_t)ins->text_len)) {
+        EnvSet(env, ins->text, (size_t)ins->text_len, value);
+        break;
+      }
+      if (!frame_holds(own, ins->operand)) {
+        printf("Runtime error: no slot for '%.*s'.\n", ins->text_len,
+               ins->text);
+        return 0;
+      }
+      own->slots[ins->operand] = value;
+      own->active[ins->operand] = 1;
+      break;
+    }
 
     case BC_MATH_ADD:
     case BC_MATH_SUB:
@@ -965,15 +1312,34 @@ static int run_chunk(VM *vm, BytecodeChunk *chunk, Environment *env,
 int HDRunProgram(HDProgram *program) {
   Environment globals;
   EnvInit(&globals);
-  /* Before the program, so a script that assigns over EV_KEY_DOWN wins. */
+  /* Before the program, so a script that assigns over EV_KEY_DOWN wins.
+   * The constants stay name-keyed: the resolver only gives slots to names
+   * the script itself declares or assigns, and a slot is consulted before
+   * the environment, so a script that shadows one still wins. */
   ffi_define_globals(&globals);
 
   VM vm;
   vm.program = program;
   vm.globals = &globals;
 
+  int count = program->global_slot_count;
+  vm.global_frame.count = count;
+  vm.global_frame.slots =
+      (HDValue *)malloc(sizeof(HDValue) * (size_t)(count > 0 ? count : 1));
+  vm.global_frame.active =
+      (unsigned char *)calloc((size_t)(count > 0 ? count : 1), 1);
+  if (!vm.global_frame.slots || !vm.global_frame.active) {
+    free(vm.global_frame.slots);
+    free(vm.global_frame.active);
+    printf("Runtime error: out of memory allocating the global frame.\n");
+    return 0;
+  }
+
   HDValue result = int_value(0);
-  return run_chunk(&vm, &program->main, &globals, &result);
+  int ok = run_chunk(&vm, &program->main, &globals, &vm.global_frame, &result);
+  free(vm.global_frame.slots);
+  free(vm.global_frame.active);
+  return ok;
 }
 
 static const char *op_name(BytecodeOp op) {
@@ -990,6 +1356,18 @@ static const char *op_name(BytecodeOp op) {
     return "VARIABLE_DEFINE";
   case BC_VARIABLE_STORE:
     return "VARIABLE_STORE";
+  case BC_LOCAL_LOAD:
+    return "LOCAL_LOAD";
+  case BC_LOCAL_DEFINE:
+    return "LOCAL_DEFINE";
+  case BC_LOCAL_STORE:
+    return "LOCAL_STORE";
+  case BC_GLOBAL_LOAD:
+    return "GLOBAL_LOAD";
+  case BC_GLOBAL_DEFINE:
+    return "GLOBAL_DEFINE";
+  case BC_GLOBAL_STORE:
+    return "GLOBAL_STORE";
   case BC_MATH_ADD:
     return "MATH_ADD";
   case BC_MATH_SUB:
@@ -1070,6 +1448,12 @@ static void dump_chunk(const char *name, BytecodeChunk *chunk) {
       printf(" %.*s", ins->text_len, ins->text);
       if (ins->op == BC_FUNCTION_CALL)
         printf(" argc=%d", ins->operand);
+    } else if (ins->op == BC_LOCAL_LOAD || ins->op == BC_LOCAL_DEFINE ||
+               ins->op == BC_LOCAL_STORE || ins->op == BC_GLOBAL_LOAD ||
+               ins->op == BC_GLOBAL_DEFINE || ins->op == BC_GLOBAL_STORE) {
+      printf(" %.*s slot=%d", ins->text_len, ins->text, ins->operand);
+      if (ins->fallback >= 0)
+        printf(" else global slot=%d", ins->fallback);
     } else if (ins->op == BC_ARRAY_CREATE || ins->op == BC_FLOW_JUMP ||
                ins->op == BC_FLOW_JUMP_IF_FALSE) {
       printf(" %d", ins->operand);
