@@ -9,3 +9,11 @@ Print("\n");
 
 auto greeting = "Hello from " ~ "Holy D!\n";
 Print(greeting);
+
+/* An escaped quote no longer ends the literal: the lexer treats a backslash
+ * as covering the next character, and the runtime resolves the escape at
+ * print time. Concatenation across one proves the whole literal survived. */
+auto quoted = "he said \"hi\"";
+Print(quoted);
+Print("\n");
+Print("a\\b" ~ " and \"c\"\n");

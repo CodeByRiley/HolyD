@@ -21,6 +21,7 @@ typedef enum {
   TOKEN_NUMBER,     		// 123
   TOKEN_FLOAT,      		// 1.5
   TOKEN_STRING,     		// "Hello"
+  TOKEN_CHAR,       		// 'a', with escapes left raw as in TOKEN_STRING
   TOKEN_IDENTIFIER, 		// variable names like x, Print, myVar
 
   // Holy D Keywords
@@ -77,6 +78,56 @@ typedef enum {
   TOKEN_EXTERN,      		// extern
   TOKEN_BREAK,					// break
   TOKEN_CONTINUE,				// continue
+
+  /* Reserved but not yet parsed. D is the language of record, so every word
+   * D reserves is claimed here whether or not HolyD implements the feature
+   * yet: a word that lexes as an identifier today cannot become a keyword
+   * later without breaking programs that used it as a name. `body` is the
+   * one D keyword deliberately absent -- D itself retired it in favour of
+   * `do` for contract bodies, so there is nothing to reserve it for. */
+  TOKEN_SWITCH,    // switch
+  TOKEN_CASE,      // case
+  TOKEN_DEFAULT,   // default
+  TOKEN_DO,        // do ... while, and D contract bodies
+  TOKEN_FOREACH_REVERSE, // foreach_reverse
+  TOKEN_TRY,       // try
+  TOKEN_CATCH,     // catch
+  TOKEN_FINALLY,   // finally
+  TOKEN_THROW,     // throw
+  TOKEN_CAST,      // cast(Type) expression
+  TOKEN_IS,        // is, and the !is identity operator
+  TOKEN_IN,        // in, and the !in membership operator
+  TOKEN_NEW,       // new
+  TOKEN_DELETE,    // delete (deprecated in D, reserved regardless)
+  TOKEN_ASSERT,    // assert(expression)
+  TOKEN_TYPEID,    // typeid
+  TOKEN_NULL,      // null
+  TOKEN_CHAR_TYPE, // char, the element type behind char[] and string
+  TOKEN_THIS,      // this(...) constructors, and the receiver
+  TOKEN_SUPER,     // super
+  TOKEN_UNION,     // union
+  TOKEN_ALIGN,     // align
+  TOKEN_INVARIANT, // invariant
+  TOKEN_PRIVATE,   // private
+  TOKEN_PROTECTED, // protected
+  TOKEN_PUBLIC,    // public
+  TOKEN_PACKAGE,   // package
+  TOKEN_EXPORT,    // export
+  TOKEN_DEPRECATED,// deprecated
+  TOKEN_PURE,      // pure
+  TOKEN_NOTHROW,   // nothrow
+  TOKEN_SYNCHRONIZED, // synchronized
+  TOKEN_VERSION,   // version (NAME) { ... }
+  TOKEN_DEBUG,     // debug
+  TOKEN_PRAGMA,    // pragma
+  TOKEN_ALIAS,     // alias Name = Type;
+  TOKEN_UNITTEST,  // unittest { ... }
+  TOKEN_TEMPLATE,  // template
+  TOKEN_MIXIN,     // mixin
+  TOKEN_MACRO,     // macro (reserved and unused in D too)
+  TOKEN_WITH,      // with (expression) { ... }
+  TOKEN_ASM,       // asm { ... }
+
   // Operators
   TOKEN_ASSIGN,     		// =
   TOKEN_PLUSPLUS,   		// ++
@@ -138,6 +189,8 @@ typedef enum {
   TOKEN_LBRACKET,  // [
   TOKEN_RBRACKET,  // ]
   TOKEN_QUESTION,  // ?
+  TOKEN_DOLLAR,    // $ (array length inside an index or slice)
+  TOKEN_AT,        // @ (attribute sigil: @safe, @nogc, @property)
 
   TOKEN_LAMBDA, // =>
 

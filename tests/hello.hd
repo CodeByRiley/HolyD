@@ -1,7 +1,7 @@
 Print("Hello, Holy D!\n");
 Print("Running on bare metal...\n");
 
-I64 version = 1;
+I64 build_version = 1;
 Print("Version: ");
-Print(version);
+Print(build_version);
 Print("\n");

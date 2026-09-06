@@ -74,7 +74,49 @@ static int string_match(const char* a, const char* b, size_t len) {
     KW("namespace", NAMESPACE)         \
     KW("extern", EXTERN)               \
     KW("break", BREAK)                 \
-    KW("continue", CONTINUE)
+    KW("continue", CONTINUE)           \
+    KW("switch", SWITCH)               \
+    KW("case", CASE)                   \
+    KW("default", DEFAULT)             \
+    KW("do", DO)                       \
+    KW("foreach_reverse", FOREACH_REVERSE) \
+    KW("try", TRY)                     \
+    KW("catch", CATCH)                 \
+    KW("finally", FINALLY)             \
+    KW("throw", THROW)                 \
+    KW("cast", CAST)                   \
+    KW("is", IS)                       \
+    KW("in", IN)                       \
+    KW("new", NEW)                     \
+    KW("delete", DELETE)               \
+    KW("assert", ASSERT)               \
+    KW("typeid", TYPEID)               \
+    KW("null", NULL)                   \
+    KW("char", CHAR_TYPE)              \
+    KW("this", THIS)                   \
+    KW("super", SUPER)                 \
+    KW("union", UNION)                 \
+    KW("align", ALIGN)                 \
+    KW("invariant", INVARIANT)         \
+    KW("private", PRIVATE)             \
+    KW("protected", PROTECTED)         \
+    KW("public", PUBLIC)               \
+    KW("package", PACKAGE)             \
+    KW("export", EXPORT)               \
+    KW("deprecated", DEPRECATED)       \
+    KW("pure", PURE)                   \
+    KW("nothrow", NOTHROW)             \
+    KW("synchronized", SYNCHRONIZED)   \
+    KW("version", VERSION)             \
+    KW("debug", DEBUG)                 \
+    KW("pragma", PRAGMA)               \
+    KW("alias", ALIAS)                 \
+    KW("unittest", UNITTEST)           \
+    KW("template", TEMPLATE)           \
+    KW("mixin", MIXIN)                 \
+    KW("macro", MACRO)                 \
+    KW("with", WITH)                   \
+    KW("asm", ASM)
 
 static const struct {
     const char *text;
@@ -166,19 +208,28 @@ static void skip_whitespace(Lexer* lexer) {
     }
 }
 
-static Token string(Lexer* lexer) {
-    while (peek(lexer) != '"' && peek(lexer) != '\0') {
+/* Scans to the closing `quote`, treating a backslash as covering whatever
+ * follows it, so \" inside a string and \' inside a char literal no longer
+ * end the literal early. What an escape *means* is still not decided here:
+ * the token keeps the raw source bytes, and print_string_escaped in
+ * src/runtime.c resolves them, which is what lets the VM and the bytes a
+ * transpiled program puts in .rodata unescape at exactly the same point. */
+static Token quoted(Lexer* lexer, char quote, TokenType type) {
+    while (peek(lexer) != quote && peek(lexer) != '\0') {
+        if (peek(lexer) == '\\' && peek_next(lexer) != '\0') {
+            advance(lexer);
+        }
         advance(lexer);
     }
 
     if (peek(lexer) == '\0') {
-        /* Unterminated strings are invalid tokens. */
+        /* Unterminated literals are invalid tokens. */
         return make_token(lexer, TOKEN_UNKNOWN);
     }
 
     // Consume the closing quote
     advance(lexer);
-    return make_token(lexer, TOKEN_STRING);
+    return make_token(lexer, type);
 }
 
 static Token number(Lexer* lexer) {
@@ -258,6 +309,8 @@ Token LexerNextToken(Lexer* lexer) {
         case ';': return make_token(lexer, TOKEN_SEMICOLON);
         case ':': return make_token(lexer, TOKEN_COLON);
         case '?': return make_token(lexer, TOKEN_QUESTION);
+        case '$': return make_token(lexer, TOKEN_DOLLAR);
+        case '@': return make_token(lexer, TOKEN_AT);
         case ',': return make_token(lexer, TOKEN_COMMA);
         /* Longest run wins throughout: every operator that is a prefix of a
          * longer one has to test for the longer one first, or `>>>=` lexes
@@ -306,7 +359,8 @@ Token LexerNextToken(Lexer* lexer) {
                 return make_token(lexer, match(lexer, '=') ? TOKEN_SHR_ASSIGN : TOKEN_SHR);
             }
             return make_token(lexer, match(lexer, '=') ? TOKEN_GTEQ : TOKEN_GT);
-        case '"': return string(lexer);
+        case '"': return quoted(lexer, '"', TOKEN_STRING);
+        case '\'': return quoted(lexer, '\'', TOKEN_CHAR);
         /* Longer */
         case '.':
             /* Longest run wins: '...' before '..' before a lone '.'. */
@@ -332,6 +386,7 @@ const char* TokenTypeToString(TokenType type) {
         case TOKEN_NUMBER: return "NUMBER";
         case TOKEN_FLOAT: return "FLOAT";
         case TOKEN_STRING: return "STRING";
+        case TOKEN_CHAR: return "CHAR";
         case TOKEN_IDENTIFIER: return "IDENTIFIER";
 #define KW(text, keyword_type) case TOKEN_##keyword_type: return #keyword_type;
         HD_KEYWORD_LIST(KW)
@@ -387,6 +442,8 @@ const char* TokenTypeToString(TokenType type) {
         case TOKEN_RBRACE: return "RBRACE";
         case TOKEN_LBRACKET: return "LBRACKET";
         case TOKEN_RBRACKET: return "RBRACKET";
+        case TOKEN_DOLLAR: return "DOLLAR";
+        case TOKEN_AT: return "AT";
         case TOKEN_LAMBDA: return "LAMBDA";
         case TOKEN_UNKNOWN: return "UNKNOWN";
         default: return "UNHANDLED";
