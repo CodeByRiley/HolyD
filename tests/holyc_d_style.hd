@@ -27,4 +27,5 @@ void main() {
 
     Banner;
     writeln("len=", nums.length, " total=", total, " countdown=", countdown);
+
 }

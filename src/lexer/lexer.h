@@ -56,15 +56,27 @@ typedef enum {
   TOKEN_IMPORT,      		// import
   TOKEN_CONST,       		// const
   TOKEN_IMMUTABLE,   		// immutable
+  TOKEN_STATIC,      		// static
   TOKEN_SHARED,      		// shared
   TOKEN_INOUT,       		// inout
   TOKEN_FUNCTION,    		// function
+  TOKEN_CLASS,       		// class
+  TOKEN_STRUCT,      		// struct
+  TOKEN_INTERFACE,   		// interface
+  TOKEN_ENUM,        		// enum
   TOKEN_DELEGATE,    		// delegate
   TOKEN_TYPEOF,      		// typeof
   TOKEN_REF,         		// ref
   TOKEN_OUT,         		// out
   TOKEN_LAZY,        		// lazy
   TOKEN_SCOPE,       		// scope
+  TOKEN_ABSTRACT,    		// abstract
+  TOKEN_FINAL,       		// final
+  TOKEN_OVERRIDE,    		// override
+  TOKEN_NAMESPACE,			// namespace (x) { ... }
+  TOKEN_EXTERN,      		// extern
+  TOKEN_BREAK,					// break
+  TOKEN_CONTINUE,				// continue
   // Operators
   TOKEN_ASSIGN,     		// =
   TOKEN_PLUSPLUS,   		// ++
@@ -126,6 +138,8 @@ typedef enum {
   TOKEN_LBRACKET,  // [
   TOKEN_RBRACKET,  // ]
   TOKEN_QUESTION,  // ?
+
+  TOKEN_LAMBDA, // =>
 
   TOKEN_UNKNOWN // Anything we don't recognize
 } TokenType;

@@ -17,6 +17,74 @@ static int string_match(const char* a, const char* b, size_t len) {
     return 1;
 }
 
+/* One source of truth for identifier-shaped tokens. The generated table
+ * keeps spelling, length, and TokenType together, so adding a keyword cannot
+ * put it in the wrong length arm (the old `struct` entry did exactly that). */
+#define HD_KEYWORD_LIST(KW)            \
+    KW("U0", U0)                       \
+    KW("I8", I8)                       \
+    KW("U8", U8)                       \
+    KW("I16", I16)                     \
+    KW("U16", U16)                     \
+    KW("I32", I32)                     \
+    KW("U32", U32)                     \
+    KW("I64", I64)                     \
+    KW("U64", U64)                     \
+    KW("F64", F64)                     \
+    KW("void", VOID)                   \
+    KW("int", INT)                     \
+    KW("uint", UINT)                   \
+    KW("long", LONG)                   \
+    KW("ulong", ULONG)                 \
+    KW("double", DOUBLE)               \
+    KW("bool", BOOL)                   \
+    KW("string", STRING_TYPE)          \
+    KW("auto", AUTO)                   \
+    KW("foreach", FOREACH)             \
+    KW("for", FOR)                     \
+    KW("if", IF)                       \
+    KW("else", ELSE)                   \
+    KW("while", WHILE)                 \
+    KW("return", RETURN)               \
+    KW("goto", GOTO)                   \
+    KW("true", TRUE)                   \
+    KW("false", FALSE)                 \
+    KW("module", MODULE)               \
+    KW("import", IMPORT)               \
+    KW("const", CONST)                 \
+    KW("immutable", IMMUTABLE)         \
+    KW("static", STATIC)               \
+    KW("shared", SHARED)               \
+    KW("inout", INOUT)                 \
+    KW("function", FUNCTION)           \
+    KW("class", CLASS)                 \
+    KW("struct", STRUCT)               \
+    KW("interface", INTERFACE)         \
+    KW("enum", ENUM)                   \
+    KW("delegate", DELEGATE)           \
+    KW("typeof", TYPEOF)               \
+    KW("ref", REF)                     \
+    KW("out", OUT)                     \
+    KW("lazy", LAZY)                   \
+    KW("scope", SCOPE)                 \
+    KW("abstract", ABSTRACT)           \
+    KW("final", FINAL)                 \
+    KW("override", OVERRIDE)           \
+    KW("namespace", NAMESPACE)         \
+    KW("extern", EXTERN)               \
+    KW("break", BREAK)                 \
+    KW("continue", CONTINUE)
+
+static const struct {
+    const char *text;
+    size_t length;
+    TokenType type;
+} keywords[] = {
+#define KW(text, type) {text, sizeof(text) - 1, TOKEN_##type},
+    HD_KEYWORD_LIST(KW)
+#undef KW
+};
+
 void LexerInit(Lexer* lexer, const char* source) {
     lexer->source = source;
     lexer->start = source;
@@ -145,65 +213,13 @@ static Token identifier(Lexer* lexer) {
     }
 
     size_t length = (size_t)(lexer->current - lexer->start);
-
-    switch (length) {
-      case 2:
-        if (string_match(lexer->start, "U0", 2)) return make_token(lexer, TOKEN_U0);
-        if (string_match(lexer->start, "U8", 2)) return make_token(lexer, TOKEN_U8);
-        if (string_match(lexer->start, "I8", 2)) return make_token(lexer, TOKEN_I8);
-        if (string_match(lexer->start, "if", 2)) return make_token(lexer, TOKEN_IF);
-        break;
-      case 3:
-        if (string_match(lexer->start, "I16", 3)) return make_token(lexer, TOKEN_I16);
-        if (string_match(lexer->start, "U16", 3)) return make_token(lexer, TOKEN_U16);
-        if (string_match(lexer->start, "I32", 3)) return make_token(lexer, TOKEN_I32);
-        if (string_match(lexer->start, "I64", 3)) return make_token(lexer, TOKEN_I64);
-        if (string_match(lexer->start, "U32", 3)) return make_token(lexer, TOKEN_U32);
-        if (string_match(lexer->start, "U64", 3)) return make_token(lexer, TOKEN_U64);
-        if (string_match(lexer->start, "F64", 3)) return make_token(lexer, TOKEN_F64);
-        if (string_match(lexer->start, "int", 3)) return make_token(lexer, TOKEN_INT);
-        if (string_match(lexer->start, "ref", 3)) return make_token(lexer, TOKEN_REF);
-        if (string_match(lexer->start, "out", 3)) return make_token(lexer, TOKEN_OUT);
-        if (string_match(lexer->start, "for", 3)) return make_token(lexer, TOKEN_FOR);
-        break;
-      case 4:
-        if (string_match(lexer->start, "void", 4)) return make_token(lexer, TOKEN_VOID);
-        if (string_match(lexer->start, "uint", 4)) return make_token(lexer, TOKEN_UINT);
-        if (string_match(lexer->start, "true", 4)) return make_token(lexer, TOKEN_TRUE);
-        if (string_match(lexer->start, "long", 4)) return make_token(lexer, TOKEN_LONG);
-        if (string_match(lexer->start, "auto", 4)) return make_token(lexer, TOKEN_AUTO);
-        if (string_match(lexer->start, "bool", 4)) return make_token(lexer, TOKEN_BOOL);
-        if (string_match(lexer->start, "lazy", 4)) return make_token(lexer, TOKEN_LAZY);
-        if (string_match(lexer->start, "else", 4)) return make_token(lexer, TOKEN_ELSE);
-        if (string_match(lexer->start, "goto", 4)) return make_token(lexer, TOKEN_GOTO);
-        break;
-      case 5:
-        if (string_match(lexer->start, "ulong", 5)) return make_token(lexer, TOKEN_ULONG);
-        if (string_match(lexer->start, "const", 5)) return make_token(lexer, TOKEN_CONST);
-        if (string_match(lexer->start, "inout", 5)) return make_token(lexer, TOKEN_INOUT);
-        if (string_match(lexer->start, "scope", 5)) return make_token(lexer, TOKEN_SCOPE);
-        if (string_match(lexer->start, "while", 5)) return make_token(lexer, TOKEN_WHILE);
-        if (string_match(lexer->start, "false", 5)) return make_token(lexer, TOKEN_FALSE);
-        break;
-      case 6:
-        if (string_match(lexer->start, "double", 6)) return make_token(lexer, TOKEN_DOUBLE);
-        if (string_match(lexer->start, "string", 6)) return make_token(lexer, TOKEN_STRING_TYPE);
-        if (string_match(lexer->start, "return", 6)) return make_token(lexer, TOKEN_RETURN);
-        if (string_match(lexer->start, "module", 6)) return make_token(lexer, TOKEN_MODULE);
-        if (string_match(lexer->start, "import", 6)) return make_token(lexer, TOKEN_IMPORT);
-        if (string_match(lexer->start, "shared", 6)) return make_token(lexer, TOKEN_SHARED);
-        if (string_match(lexer->start, "typeof", 6)) return make_token(lexer, TOKEN_TYPEOF);
-        break;
-      case 7:
-        if (string_match(lexer->start, "foreach", 7)) return make_token(lexer, TOKEN_FOREACH);
-        break;
-      case 8:
-        if (string_match(lexer->start, "function", 8)) return make_token(lexer, TOKEN_FUNCTION);
-        if (string_match(lexer->start, "delegate", 8)) return make_token(lexer, TOKEN_DELEGATE);
-        break;
-      case 9:
-        if (string_match(lexer->start, "immutable", 9)) return make_token(lexer, TOKEN_IMMUTABLE);
-        break;
+    size_t keyword_count = sizeof(keywords) / sizeof(keywords[0]);
+    for (size_t i = 0; i < keyword_count; i++) {
+        if (keywords[i].text[0] == lexer->start[0] &&
+            keywords[i].length == length &&
+            string_match(lexer->start, keywords[i].text, length)) {
+            return make_token(lexer, keywords[i].type);
+        }
     }
 
     return make_token(lexer, TOKEN_IDENTIFIER);
@@ -272,7 +288,9 @@ Token LexerNextToken(Lexer* lexer) {
             }
             return make_token(lexer, match(lexer, '=') ? TOKEN_XOR_ASSIGN : TOKEN_XOR);
         case '!': return make_token(lexer, match(lexer, '=') ? TOKEN_NEQ : TOKEN_BANG);
-        case '=': return make_token(lexer, match(lexer, '=') ? TOKEN_EQEQ : TOKEN_ASSIGN);
+        case '=':
+            if (match(lexer, '>')) return make_token(lexer, TOKEN_LAMBDA);
+            return make_token(lexer, match(lexer, '=') ? TOKEN_EQEQ : TOKEN_ASSIGN);
         case '<':
             if (match(lexer, '<')) {
                 return make_token(lexer, match(lexer, '=') ? TOKEN_SHL_ASSIGN : TOKEN_SHL);
@@ -314,47 +332,9 @@ const char* TokenTypeToString(TokenType type) {
         case TOKEN_FLOAT: return "FLOAT";
         case TOKEN_STRING: return "STRING";
         case TOKEN_IDENTIFIER: return "IDENTIFIER";
-        case TOKEN_U0: return "U0";
-        case TOKEN_I8: return "I8";
-        case TOKEN_U8: return "U8";
-        case TOKEN_I16: return "I16";
-        case TOKEN_U16: return "U16";
-        case TOKEN_I32: return "I32";
-        case TOKEN_I64: return "I64";
-        case TOKEN_U32: return "U32";
-        case TOKEN_U64: return "U64";
-        case TOKEN_F64: return "F64";
-        case TOKEN_VOID: return "VOID";
-        case TOKEN_INT: return "INT";
-        case TOKEN_UINT: return "UINT";
-        case TOKEN_LONG: return "LONG";
-        case TOKEN_ULONG: return "ULONG";
-        case TOKEN_DOUBLE: return "DOUBLE";
-        case TOKEN_BOOL: return "BOOL";
-        case TOKEN_STRING_TYPE: return "STRING_TYPE";
-        case TOKEN_AUTO: return "AUTO";
-        case TOKEN_FOREACH: return "FOREACH";
-        case TOKEN_FOR: return "FOR";
-        case TOKEN_IF: return "IF";
-        case TOKEN_ELSE: return "ELSE";
-        case TOKEN_WHILE: return "WHILE";
-        case TOKEN_RETURN: return "RETURN";
-        case TOKEN_GOTO: return "GOTO";
-        case TOKEN_TRUE: return "TRUE";
-        case TOKEN_FALSE: return "FALSE";
-        case TOKEN_MODULE: return "MODULE";
-        case TOKEN_IMPORT: return "IMPORT";
-        case TOKEN_CONST: return "CONST";
-        case TOKEN_IMMUTABLE: return "IMMUTABLE";
-        case TOKEN_SHARED: return "SHARED";
-        case TOKEN_INOUT: return "INOUT";
-        case TOKEN_FUNCTION: return "FUNCTION";
-        case TOKEN_DELEGATE: return "DELEGATE";
-        case TOKEN_TYPEOF: return "TYPEOF";
-        case TOKEN_REF: return "REF";
-        case TOKEN_OUT: return "OUT";
-        case TOKEN_LAZY: return "LAZY";
-        case TOKEN_SCOPE: return "SCOPE";
+#define KW(text, keyword_type) case TOKEN_##keyword_type: return #keyword_type;
+        HD_KEYWORD_LIST(KW)
+#undef KW
         case TOKEN_ASSIGN: return "ASSIGN";
         case TOKEN_ANDAND: return "ANDAND";
         case TOKEN_OROR: return "OROR";
@@ -406,6 +386,7 @@ const char* TokenTypeToString(TokenType type) {
         case TOKEN_RBRACE: return "RBRACE";
         case TOKEN_LBRACKET: return "LBRACKET";
         case TOKEN_RBRACKET: return "RBRACKET";
+        case TOKEN_LAMBDA: return "LAMBDA";
         case TOKEN_UNKNOWN: return "UNKNOWN";
         default: return "UNHANDLED";
     }
