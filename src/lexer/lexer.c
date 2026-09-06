@@ -18,8 +18,9 @@ static int string_match(const char* a, const char* b, size_t len) {
 }
 
 /* One source of truth for identifier-shaped tokens. The generated table
- * keeps spelling, length, and TokenType together, so adding a keyword cannot
- * put it in the wrong length arm (the old `struct` entry did exactly that). */
+ * keeps spelling, length, and TokenType together, so a keyword cannot be
+ * filed under the wrong length -- a mistake the old switch-on-length made
+ * easy, and which showed up only as a stray IDENTIFIER in the parser. */
 #define HD_KEYWORD_LIST(KW)            \
     KW("U0", U0)                       \
     KW("I8", I8)                       \
