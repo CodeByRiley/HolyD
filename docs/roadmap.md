@@ -76,6 +76,8 @@ Wire up the missing flags the front-end can already support.
 --emit-c and -o , done; see section 10.
 -ast , done. ASTPrint(node, indent) recursively prints each node payload and
 its parsed type syntax.
+--dump-types , done. It prints resolved symbol types and the inferred type of
+each AST node alongside its source span.
 -version=NAME and -debug[=NAME] , feed D's conditional-compilation system.
 Do not retain -D as a second spelling for the same feature.
 This is cheap, unblocks debugging, and gives HolyD a D-shaped build model.
@@ -96,7 +98,7 @@ Clean up the existing expression representation:
 
 - Add AST_BOOL_LITERAL, AST_CHAR_LITERAL, and AST_NULL_LITERAL.
 - Add AST_ARRAY_LITERAL instead of representing an array as an AST_CALL named
-  "[array]".
+  "[array]". Done.
 - Add AST_UNARY_OP, AST_UPDATE, AST_CONDITIONAL, AST_CAST,
   AST_MEMBER_ACCESS, AST_SLICE, AST_DOLLAR, AST_NEW, and
   AST_FUNCTION_LITERAL.
@@ -329,12 +331,18 @@ the difference, on both paths.
 
 `--dump-symbols` prints the whole table: symbols with their storage, slot
 and fallback, and every binding. `--dump-bytecode` shows the slot operands.
+The first semantic type pass now lowers TypeSyntax to stable, interned type
+IDs and records symbol and expression types in a side table; `--dump-types`
+shows both. It is intentionally non-rejecting while the boxed runtime still
+accepts compatibility cases such as assigning an integer to a pointer slot.
 
-The type system, sections 2 and 3 above, is what is left. Once expressions
-carry a static type, I64 + I64 emits a + b instead of a call, and a boxed
-value survives only where the value really is dynamic. With names already
-resolved to slots, that is what makes the generated C worth compiling
-rather than merely correct.
+The C backend now consumes those types for representation-stable scalar
+slots and expressions. I64/F64 locals and globals can become long long/double,
+and safe arithmetic and comparisons emit C operators instead of HDBinaryX.
+A pre-pass keeps a slot boxed if any declaration or write can carry a different
+runtime representation; mixed I64/F64 ternaries are the important example.
+The next step is typed function ABIs, followed by checked direct division,
+remainder, shifts, and power.
 
 The remaining backend choices stay open, and are cheaper than they look,
 because name resolution is already done and shared, and typing will be:
@@ -348,10 +356,10 @@ exchange, mem2reg means deliberately naive emission optimises itself, and
 one IR reaches several architectures. It does not solve C ABI struct
 passing; that layer stays in the frontend.
 
-Section 2 will move the backend when it lands: retiring AST_INDEX_ASSIGN,
-replacing AST_ARRAY_LEN_EXPR with AST_MEMBER_ACCESS, introducing
-AST_ARRAY_LITERAL in place of an AST_CALL named "[array]", and giving
-AST_CALL a callee expression all touch src/emit_c.c directly.
+The AST_ARRAY_LITERAL migration already updated every backend. The remaining
+section 2 cleanup will move them again: retiring AST_INDEX_ASSIGN, replacing
+AST_ARRAY_LEN_EXPR with AST_MEMBER_ACCESS, and giving AST_CALL a callee
+expression all touch src/emit_c.c directly.
 
 ## Standard library
 

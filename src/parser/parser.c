@@ -12,6 +12,15 @@ static int ParseParameterList(Parser* parser, int require_names,
                               ParameterSyntax** parameters_out,
                               int* parameter_count_out);
 
+static ASTNode* span_token(ASTNode* node, Token token) {
+    return ASTSetSpan(node, token.span);
+}
+
+static ASTNode* span_between(ASTNode* node, HDSourceSpan first,
+                             HDSourceSpan last) {
+    return ASTSetSpan(node, HDSourceSpanCover(first, last));
+}
+
 static int append_node(ASTNode*** items, int* count, int* capacity, ASTNode* node) {
     if (*count >= *capacity) {
         int new_capacity = *capacity ? *capacity * 2 : 8;
@@ -438,7 +447,7 @@ static ASTNode* ParseNumber(Parser* parser) {
         else if (c >= 'A' && c <= 'F') digit = c - 'A' + 10;
         val = val * base + digit;
     }
-    return ASTNewNumber(val);
+    return span_token(ASTNewNumber(val), parser->previous);
 }
 
 static ASTNode* ParseFloat(Parser* parser) {
@@ -464,17 +473,18 @@ static ASTNode* ParseFloat(Parser* parser) {
     }
     val += (double)frac / divisor;
 
-    return ASTNewFloat(val);
+    return span_token(ASTNewFloat(val), parser->previous);
 }
 
 static ASTNode* ParseString(Parser* parser) {
     // Strip the quotes
     const char* str = parser->previous.start + 1;
     int len = parser->previous.length - 2;
-    return ASTNewString(str, len);
+    return span_token(ASTNewString(str, len), parser->previous);
 }
 
 static ASTNode* ParseCall(Parser* parser) {
+    Token name_token = parser->previous;
     const char* name = parser->previous.start;
     int len = parser->previous.length;
 
@@ -493,8 +503,12 @@ static ASTNode* ParseCall(Parser* parser) {
         } while (match(parser, TOKEN_COMMA));
     }
 
-    match(parser, TOKEN_RPAREN); // Consume ')'
-    return ASTNewCall(name, len, args, arg_count);
+    int closed = match(parser, TOKEN_RPAREN); // Consume ')'
+    ASTNode* call = ASTNewCall(name, len, args, arg_count);
+    HDSourceSpan end = closed ? parser->previous.span
+                              : arg_count > 0 ? args[arg_count - 1]->span
+                                              : name_token.span;
+    return span_between(call, name_token.span, end);
 }
 
 static ASTNode* ParsePrimary(Parser* parser) {
@@ -513,12 +527,19 @@ static ASTNode* ParsePrimary(Parser* parser) {
     if (match(parser, TOKEN_NUMBER)) return ParseNumber(parser);
     if (match(parser, TOKEN_FLOAT)) return ParseFloat(parser);
     if (match(parser, TOKEN_STRING)) return ParseString(parser);
-    if (match(parser, TOKEN_TRUE)) return ASTNewNumber(1);
-    if (match(parser, TOKEN_FALSE)) return ASTNewNumber(0);
+    if (match(parser, TOKEN_TRUE))
+        return span_token(ASTNewBoolean(1), parser->previous);
+    if (match(parser, TOKEN_FALSE))
+        return span_token(ASTNewBoolean(0), parser->previous);
 
     if (match(parser, TOKEN_LPAREN)) {
+        Token opening = parser->previous;
         ASTNode* expr = ParseExpression(parser);
-        if (!match(parser, TOKEN_RPAREN)) {
+        if (match(parser, TOKEN_RPAREN)) {
+            if (expr != NULL)
+                expr->span = HDSourceSpanCover(opening.span,
+                                               parser->previous.span);
+        } else {
             parser->had_error = 1;
             printf("Parse error: Expected ')' on line %zu\n", parser->lexer.line);
         }
@@ -526,14 +547,16 @@ static ASTNode* ParsePrimary(Parser* parser) {
     }
 
     if (match(parser, TOKEN_IDENTIFIER)) {
+        Token name = parser->previous;
         if (check(parser, TOKEN_LPAREN)) {
             return ParseCall(parser);
         }
-        return ASTNewVarRef(parser->previous.start, parser->previous.length);
+        return span_token(ASTNewVarRef(name.start, name.length), name);
     }
 
     // Parse Array Literal: [1, 2, 3]
     if (match(parser, TOKEN_LBRACKET)) {
+        Token opening = parser->previous;
         ASTNode** elements = NULL;
         int count = 0;
         int capacity = 0;
@@ -546,11 +569,13 @@ static ASTNode* ParsePrimary(Parser* parser) {
                 }
             } while (match(parser, TOKEN_COMMA));
         }
-        match(parser, TOKEN_RBRACKET); // Consume ']'
+        int closed = match(parser, TOKEN_RBRACKET); // Consume ']'
 
-        // We will reuse AST_CALL's structure to hold the array elements,
-        // but we will give it a special name so the evaluator knows it's an array.
-        return ASTNewCall("[array]", 7, elements, count);
+        ASTNode* array = ASTNewArrayLiteral(elements, count);
+        HDSourceSpan end = closed ? parser->previous.span
+                                  : count > 0 ? elements[count - 1]->span
+                                              : opening.span;
+        return span_between(array, opening.span, end);
     }
 
     parser->had_error = 1;
@@ -569,6 +594,7 @@ static ASTNode* ParsePostfix(Parser* parser) {
 
     while (node != NULL) {
         if (match(parser, TOKEN_LBRACKET)) {
+            HDSourceSpan start = node->span;
             ASTNode* index = ParseExpression(parser);
             if (check(parser, TOKEN_DOTDOT)) {
                 parser->had_error = 1;
@@ -581,6 +607,8 @@ static ASTNode* ParsePostfix(Parser* parser) {
                 printf("Parse error: Expected ']' on line %zu\n", parser->lexer.line);
             }
             node = ASTNewIndex(node, index);
+            if (parser->previous.type == TOKEN_RBRACKET)
+                node->span = HDSourceSpanCover(start, parser->previous.span);
         } else if (match(parser, TOKEN_DOT)) {
             if (!match(parser, TOKEN_IDENTIFIER)) {
                 parser->had_error = 1;
@@ -588,7 +616,10 @@ static ASTNode* ParsePostfix(Parser* parser) {
                 break;
             }
             if (token_is_identifier_text(parser->previous, "length")) {
+                HDSourceSpan start = node->span;
+                HDSourceSpan end = parser->previous.span;
                 node = ASTNewArrayLenExpr(node);
+                node->span = HDSourceSpanCover(start, end);
             } else {
                 parser->had_error = 1;
                 printf("Parse error: Unknown property '%.*s' on line %zu\n",
@@ -642,9 +673,14 @@ static ASTNode* ParsePower(Parser* parser) {
 
 static ASTNode* ParseUnary(Parser* parser) {
     if (check(parser, TOKEN_BANG) || check(parser, TOKEN_MINUS)) {
+        Token operator_token = parser->current;
         TokenType op = parser->current.type;
         advance(parser);
-        return ASTNewUnaryOp(op, ParseUnary(parser));
+        ASTNode* operand = ParseUnary(parser);
+        ASTNode* unary = ASTNewUnaryOp(op, operand);
+        if (operand != NULL)
+            unary->span = HDSourceSpanCover(operator_token.span, operand->span);
+        return unary;
     }
     return ParsePower(parser);
 }
@@ -795,21 +831,27 @@ static TokenType compound_binary_op(TokenType op) {
 
 static ASTNode* make_inc_dec(ASTNode* target, TokenType op) {
     TokenType bin_op = op == TOKEN_PLUSPLUS ? TOKEN_PLUS : TOKEN_MINUS;
-    return ASTNewAssign(target->as.variable_ref.name,
-                        target->as.variable_ref.name_length,
-                        ASTNewBinaryOp(bin_op,
-                                       ASTNewVarRef(target->as.variable_ref.name,
-                                                    target->as.variable_ref.name_length),
-                                       ASTNewNumber(1)));
+    ASTNode* reference = ASTSetSpan(
+        ASTNewVarRef(target->as.variable_ref.name,
+                     target->as.variable_ref.name_length), target->span);
+    ASTNode* one = ASTSetSpan(ASTNewNumber(1), target->span);
+    ASTNode* value = ASTNewBinaryOp(bin_op, reference, one);
+    return ASTSetSpan(ASTNewAssign(target->as.variable_ref.name,
+                                  target->as.variable_ref.name_length, value),
+                      target->span);
 }
 
 static ASTNode* ParseAssignmentExpression(Parser* parser) {
     ASTNode* expr = ParseExpression(parser);
     if (expr != NULL && expr->type == AST_VAR_REF) {
         if (match(parser, TOKEN_ASSIGN)) {
-            return ASTNewAssign(expr->as.variable_ref.name,
-                                expr->as.variable_ref.name_length,
-                                ParseExpression(parser));
+            ASTNode* value = ParseExpression(parser);
+            ASTNode* assignment = ASTNewAssign(expr->as.variable_ref.name,
+                                               expr->as.variable_ref.name_length,
+                                               value);
+            if (value != NULL)
+                assignment->span = HDSourceSpanCover(expr->span, value->span);
+            return assignment;
         }
         if (match(parser, TOKEN_PLUSPLUS)) {
             return make_inc_dec(expr, TOKEN_PLUSPLUS);
@@ -821,12 +863,17 @@ static ASTNode* ParseAssignmentExpression(Parser* parser) {
         TokenType compound = compound_binary_op(parser->current.type);
         if (compound != TOKEN_UNKNOWN) {
             advance(parser);
-            return ASTNewAssign(expr->as.variable_ref.name,
-                                expr->as.variable_ref.name_length,
-                                ASTNewBinaryOp(compound,
-                                               ASTNewVarRef(expr->as.variable_ref.name,
-                                                            expr->as.variable_ref.name_length),
-                                               ParseExpression(parser)));
+            ASTNode* reference = ASTSetSpan(
+                ASTNewVarRef(expr->as.variable_ref.name,
+                             expr->as.variable_ref.name_length), expr->span);
+            ASTNode* right = ParseExpression(parser);
+            ASTNode* value = ASTNewBinaryOp(compound, reference, right);
+            ASTNode* assignment = ASTNewAssign(
+                expr->as.variable_ref.name, expr->as.variable_ref.name_length,
+                value);
+            if (right != NULL)
+                assignment->span = HDSourceSpanCover(expr->span, right->span);
+            return assignment;
         }
     }
 
@@ -866,13 +913,19 @@ static ASTNode* ParseVarDecl(Parser* parser, TypeSyntax* type, Token name) {
     if (match(parser, TOKEN_ASSIGN)) {
         init = ParseExpression(parser);
     }
+    int terminated = 0;
     if (check(parser, TOKEN_SEMICOLON) || check(parser, TOKEN_NEWLINE)) {
         advance(parser);
+        terminated = 1;
     }
-    return ASTNewVarDecl(type, name.start, name.length, init);
+    ASTNode* declaration = ASTNewVarDecl(type, name.start, name.length, init);
+    HDSourceSpan end = terminated ? parser->previous.span
+                                  : init != NULL ? init->span : name.span;
+    return span_between(declaration, name.span, end);
 }
 
 static ASTNode* ParseIfStatement(Parser* parser) {
+    HDSourceSpan start = parser->previous.span;
     match(parser, TOKEN_LPAREN); // Consume '('
     ASTNode* cond = ParseExpression(parser);
     match(parser, TOKEN_RPAREN); // Consume ')'
@@ -882,23 +935,31 @@ static ASTNode* ParseIfStatement(Parser* parser) {
     if (match(parser, TOKEN_ELSE)) {
         else_block = ParseBlock(parser);
     }
-    return ASTNewIf(cond, then_block, else_block);
+    ASTNode* statement = ASTNewIf(cond, then_block, else_block);
+    ASTNode* last = else_block != NULL ? else_block : then_block;
+    if (last != NULL) statement->span = HDSourceSpanCover(start, last->span);
+    return statement;
 }
 
 static ASTNode* ParseWhileStatement(Parser* parser) {
+    HDSourceSpan start = parser->previous.span;
     match(parser, TOKEN_LPAREN);
     ASTNode* cond = ParseExpression(parser);
     match(parser, TOKEN_RPAREN);
 
     ASTNode* body = ParseBlock(parser);
-    return ASTNewWhile(cond, body);
+    ASTNode* statement = ASTNewWhile(cond, body);
+    if (body != NULL) statement->span = HDSourceSpanCover(start, body->span);
+    return statement;
 }
 
 static ASTNode* ParseForStatement(Parser* parser) {
+    HDSourceSpan start = parser->previous.span;
     match(parser, TOKEN_LPAREN);
 
     ASTNode* init = NULL;
     if (!match(parser, TOKEN_SEMICOLON)) {
+        HDSourceSpan declaration_start = parser->current.span;
         TypeSyntax* type = ParseOptionalDeclarationType(parser);
         if (type != NULL) {
             if (!check(parser, TOKEN_IDENTIFIER)) {
@@ -909,6 +970,8 @@ static ASTNode* ParseForStatement(Parser* parser) {
             Token name_token = parser->current;
             advance(parser);
             init = ParseVarDecl(parser, type, name_token);
+            if (init != NULL)
+                init->span = HDSourceSpanCover(declaration_start, init->span);
         } else {
             init = ParseAssignmentExpression(parser);
             match(parser, TOKEN_SEMICOLON);
@@ -928,10 +991,13 @@ static ASTNode* ParseForStatement(Parser* parser) {
     match(parser, TOKEN_RPAREN);
 
     ASTNode* body = ParseBlock(parser);
-    return ASTNewFor(init, cond, inc, body);
+    ASTNode* statement = ASTNewFor(init, cond, inc, body);
+    if (body != NULL) statement->span = HDSourceSpanCover(start, body->span);
+    return statement;
 }
 
 static ASTNode* ParseForeach(Parser* parser) {
+    HDSourceSpan start = parser->previous.span;
     match(parser, TOKEN_LPAREN);
 
     TypeSyntax* first_type = ParseOptionalDeclarationType(parser);
@@ -972,8 +1038,11 @@ static ASTNode* ParseForeach(Parser* parser) {
     match(parser, TOKEN_RPAREN); // Consume ')'
 
     ASTNode* body = ParseBlock(parser);
-    return ASTNewForeach(variable_type, var_name, var_len, index_type,
-                         index_name, index_len, array_expr, body);
+    ASTNode* statement = ASTNewForeach(variable_type, var_name, var_len,
+                                       index_type, index_name, index_len,
+                                       array_expr, body);
+    if (body != NULL) statement->span = HDSourceSpanCover(start, body->span);
+    return statement;
 }
 
 /* A loop or conditional body. With braces it is a statement list; without
@@ -983,9 +1052,10 @@ static ASTNode* ParseForeach(Parser* parser) {
  * below ran to '}' or EOF either way: `if (c) Foo();` quietly pulled every
  * following statement into the body. */
 static ASTNode* ParseBlock(Parser* parser) {
-    if (!match(parser, TOKEN_LBRACE)) {
+    if (!check(parser, TOKEN_LBRACE)) {
         if (match(parser, TOKEN_SEMICOLON)) {
-            return ASTNewBlock(NULL, 0); // `if (c) ;` , an empty body.
+            return span_token(ASTNewBlock(NULL, 0), parser->previous);
+            // `if (c) ;` , an empty body.
         }
 
         ASTNode* stmt = ParseStatement(parser);
@@ -1006,6 +1076,9 @@ static ASTNode* ParseBlock(Parser* parser) {
         only[0] = stmt;
         return ASTNewBlock(only, 1);
     }
+
+    Token opening = parser->current;
+    advance(parser);
 
     skip_terminators(parser);    // Skip newlines after '{'
 
@@ -1029,12 +1102,17 @@ static ASTNode* ParseBlock(Parser* parser) {
         skip_terminators(parser); // NEW: Skip newlines between statements in block
     }
 
-    if (!match(parser, TOKEN_RBRACE)) {
+    int closed = match(parser, TOKEN_RBRACE);
+    if (!closed) {
         parser->had_error = 1;
         printf("Parse error: Expected '}' on line %zu\n", parser->lexer.line);
     }
 
-    return ASTNewBlock(stmts, count);
+    ASTNode* block = ASTNewBlock(stmts, count);
+    HDSourceSpan end = closed ? parser->previous.span
+                              : count > 0 ? stmts[count - 1]->span
+                                          : opening.span;
+    return span_between(block, opening.span, end);
 }
 
 static ASTNode* ParseFuncDecl(Parser* parser, TypeSyntax* return_type,
@@ -1048,11 +1126,14 @@ static ASTNode* ParseFuncDecl(Parser* parser, TypeSyntax* return_type,
     skip_terminators(parser);    // Allow newline before '{'
 
     ASTNode* body = ParseBlock(parser);
-    return ASTNewFuncDecl(return_type, name.start, name.length, parameters,
-                          parameter_count, body);
+    ASTNode* function = ASTNewFuncDecl(return_type, name.start, name.length,
+                                       parameters, parameter_count, body);
+    if (body != NULL) function->span = HDSourceSpanCover(name.span, body->span);
+    return function;
 }
 
 static ASTNode* ParseIgnoredDirective(Parser* parser) {
+    HDSourceSpan start = parser->previous.span;
     while (!check(parser, TOKEN_SEMICOLON) &&
            !check(parser, TOKEN_NEWLINE) &&
            !check(parser, TOKEN_EOF)) {
@@ -1061,13 +1142,14 @@ static ASTNode* ParseIgnoredDirective(Parser* parser) {
     if (check(parser, TOKEN_SEMICOLON) || check(parser, TOKEN_NEWLINE)) {
         advance(parser);
     }
-    return ASTNewBlock(NULL, 0);
+    return span_between(ASTNewBlock(NULL, 0), start, parser->previous.span);
 }
 
 /* `.name:` marks a jump target. The leading dot is what makes it a
  * statement the parser can recognise without lookahead: nothing else in the
  * grammar begins with one, so a bare name stays an expression statement. */
 static ASTNode* ParseLabel(Parser* parser) {
+    HDSourceSpan start = parser->previous.span;
     if (!check(parser, TOKEN_IDENTIFIER)) {
         parser->had_error = 1;
         printf("Parse error: Expected a label name after '.' on line %zu\n",
@@ -1083,13 +1165,15 @@ static ASTNode* ParseLabel(Parser* parser) {
                (int)name.length, name.start, parser->lexer.line);
         return NULL;
     }
-    return ASTNewLabel(name.start, (int)name.length);
+    return span_between(ASTNewLabel(name.start, (int)name.length), start,
+                        parser->previous.span);
 }
 
 /* `goto name;` and `goto .name;` both jump to `.name:`. The dot is what the
  * declaration needs to be recognisable as one; on a jump it is optional,
  * since `goto` has already said what follows is a label. */
 static ASTNode* ParseGoto(Parser* parser) {
+    HDSourceSpan start = parser->previous.span;
     match(parser, TOKEN_DOT);
 
     if (!check(parser, TOKEN_IDENTIFIER)) {
@@ -1104,7 +1188,8 @@ static ASTNode* ParseGoto(Parser* parser) {
     if (check(parser, TOKEN_SEMICOLON) || check(parser, TOKEN_NEWLINE)) {
         advance(parser);
     }
-    return ASTNewGoto(target.start, (int)target.length);
+    return span_between(ASTNewGoto(target.start, (int)target.length), start,
+                        parser->previous.span);
 }
 
 static ASTNode* ParseStatement(Parser* parser) {
@@ -1115,6 +1200,7 @@ static ASTNode* ParseStatement(Parser* parser) {
     if (match(parser, TOKEN_DOT)) return ParseLabel(parser);
     if (match(parser, TOKEN_GOTO)) return ParseGoto(parser);
 
+    HDSourceSpan declaration_start = parser->current.span;
     TypeSyntax* declared_type = ParseOptionalDeclarationType(parser);
     if (declared_type != NULL) {
 
@@ -1124,11 +1210,21 @@ static ASTNode* ParseStatement(Parser* parser) {
 
             // If next token is '(', it's a function!
             if (check(parser, TOKEN_LPAREN)) {
-                return ParseFuncDecl(parser, declared_type, name_token);
+                ASTNode* function =
+                    ParseFuncDecl(parser, declared_type, name_token);
+                if (function != NULL)
+                    function->span = HDSourceSpanCover(declaration_start,
+                                                       function->span);
+                return function;
             }
 
             // Otherwise, it's a variable declaration
-            return ParseVarDecl(parser, declared_type, name_token);
+            ASTNode* declaration =
+                ParseVarDecl(parser, declared_type, name_token);
+            if (declaration != NULL)
+                declaration->span = HDSourceSpanCover(declaration_start,
+                                                      declaration->span);
+            return declaration;
         }
 
         parser->had_error = 1;
@@ -1143,6 +1239,7 @@ static ASTNode* ParseStatement(Parser* parser) {
     if (check(parser, TOKEN_LBRACE)) return ParseBlock(parser);
 
     if (match(parser, TOKEN_RETURN)) {
+        HDSourceSpan start = parser->previous.span;
         ASTNode* expr = NULL;
         if (!check(parser, TOKEN_SEMICOLON) && !check(parser, TOKEN_NEWLINE)) {
             expr = ParseExpression(parser);
@@ -1150,7 +1247,8 @@ static ASTNode* ParseStatement(Parser* parser) {
         if (check(parser, TOKEN_SEMICOLON) || check(parser, TOKEN_NEWLINE)) {
             advance(parser);
         }
-        return ASTNewReturn(expr);
+        ASTNode* statement = ASTNewReturn(expr);
+        return span_between(statement, start, parser->previous.span);
     }
 
     // It's an expression statement
@@ -1162,6 +1260,8 @@ static ASTNode* ParseStatement(Parser* parser) {
 }
 
 void ParserInit(Parser* parser, const char* source) {
+    memset(&parser->current, 0, sizeof(parser->current));
+    memset(&parser->previous, 0, sizeof(parser->previous));
     LexerInit(&parser->lexer, source);
     parser->had_error = 0;
     advance(parser); // Load the first token

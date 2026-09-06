@@ -518,16 +518,14 @@ static void compile_expression(Compiler *compiler, BytecodeChunk *chunk,
     emit_simple(chunk, BC_ARRAY_LENGTH);
     break;
 
-  case AST_CALL:
-    if (is_name(node->as.call.callee_name, node->as.call.callee_name_length,
-                "[array]")) {
-      for (int i = 0; i < node->as.call.argument_count; i++) {
-        compile_expression(compiler, chunk, node->as.call.arguments[i]);
-      }
-      emit_count(chunk, BC_ARRAY_CREATE, node->as.call.argument_count);
-      break;
+  case AST_ARRAY_LITERAL:
+    for (int i = 0; i < node->as.array_literal.element_count; i++) {
+      compile_expression(compiler, chunk, node->as.array_literal.elements[i]);
     }
+    emit_count(chunk, BC_ARRAY_CREATE, node->as.array_literal.element_count);
+    break;
 
+  case AST_CALL:
     for (int i = 0; i < node->as.call.argument_count; i++) {
       compile_expression(compiler, chunk, node->as.call.arguments[i]);
     }

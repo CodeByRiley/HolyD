@@ -59,6 +59,7 @@ holyd <source.hd>          run a script
 holyd --test [dir]         run every .hd under dir (default holyd/tests/)
 holyd -tokens <source.hd>  print the token stream
 holyd --dump-symbols ...   print resolved names and frame slots
+holyd --dump-types ...     print inferred symbol and expression types
 holyd --dump-bytecode ...  disassemble before running
 holyd --interpret ...      walk the AST instead of running bytecode
 holyd --emit-c <source.hd> translate to C instead of running it
@@ -101,13 +102,13 @@ gcc -std=gnu11 -O2 -I src gui.c \
     -o gui.exe -lgdi32 -luser32 -lws2_32
 ```
 
-It is a bootstrap backend, not a fast one. Control flow becomes real C
-control flow, calls become direct C calls, and each name becomes a C local
-or a file-scope static , but values stay boxed `HDValue`s, so the arithmetic
-still costs what it costs in the VM. That is deliberate: every semantic the
-VM has comes along unchanged, which is what lets the two be diffed against
-each other. Making it fast from here means giving the language a real type
-system , `docs/roadmap.md` §10.
+Control flow becomes real C control flow, calls become direct C calls, and
+each name becomes a C local or a file-scope static. The semantic type pass
+lets representation-stable integers, booleans, and doubles use native C
+storage and direct `+`, `-`, `*`, comparison, unary-minus, and compatible
+ternary expressions. Dynamic or representation-ambiguous values remain boxed
+`HDValue`s. Explicit boxing at runtime and FFI boundaries is what keeps this
+optimization diff-testable against the VM; see `docs/roadmap.md` §10.
 
 A name becoming a C variable does not make it a C *scope*. HolyD scopes
 variables to the function, and a declaration takes effect where it is

@@ -169,23 +169,17 @@ static HDValue EvalExpression(ASTNode* node, Environment* env) {
             return EvalExpression(node->as.ternary_op.false_expr, env);
         }
 
-        case AST_CALL: {
-            /* Array literals use a synthetic call node. */
-            if (node->as.call.callee_name_length == 7 &&
-                strncmp(node->as.call.callee_name, "[array]", 7) == 0) {
-                HDValue val;
-                val.type = VAL_ARRAY;
-                val.array_len = node->as.call.argument_count;
-                val.elements = (HDValue*)malloc(
-                    sizeof(HDValue) * node->as.call.argument_count);
-
-                for (int i = 0; i < node->as.call.argument_count; i++) {
-                    val.elements[i] = EvalExpression(
-                        node->as.call.arguments[i], env);
-                }
-                return val;
+        case AST_ARRAY_LITERAL: {
+            HDValue array;
+            array.type = VAL_ARRAY;
+            array.array_len = node->as.array_literal.element_count;
+            array.elements = (HDValue*)malloc(
+                sizeof(HDValue) * node->as.array_literal.element_count);
+            for (int i = 0; i < node->as.array_literal.element_count; i++) {
+                array.elements[i] = EvalExpression(
+                    node->as.array_literal.elements[i], env);
             }
-            break;
+            return array;
         }
 
         default:

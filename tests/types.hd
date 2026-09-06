@@ -1,0 +1,18 @@
+bool enabled = true;
+auto values = [10, 20, 30];
+auto selected = enabled ? values[1] : 0;
+auto promoted = enabled ? selected : 2.5;
+
+PrintLn("selected=", selected, " promoted=", promoted);
+
+U0 ShowMixed(bool choose_integer) {
+    auto local = choose_integer ? 20 : 2.5;
+    PrintLn("local=", local);
+}
+
+F64 Scale(F64 value) {
+    return value * 2.0 + 0.5;
+}
+
+ShowMixed(true);
+PrintLn("scaled=", Scale(3.0));

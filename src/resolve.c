@@ -226,6 +226,10 @@ static void visit_children(ASTNode *node,
     for (int i = 0; i < node->as.call.argument_count; i++)
       visit(resolver, node->as.call.arguments[i]);
     break;
+  case AST_ARRAY_LITERAL:
+    for (int i = 0; i < node->as.array_literal.element_count; i++)
+      visit(resolver, node->as.array_literal.elements[i]);
+    break;
   case AST_INDEX:
     visit(resolver, node->as.index_expr.target);
     visit(resolver, node->as.index_expr.index);

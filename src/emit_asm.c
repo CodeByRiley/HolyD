@@ -532,6 +532,16 @@ static int scratch_for_expr(Asm *a, ASTNode *node) {
     return argc + inner;
   }
 
+  case AST_ARRAY_LITERAL: {
+    int count = node->as.array_literal.element_count;
+    int inner = 0;
+    for (int i = 0; i < count; i++)
+      inner = max_int(inner,
+                      scratch_for_expr(a, node->as.array_literal.elements[i]));
+    note_args(a, count + 1);
+    return count + inner;
+  }
+
   case AST_INDEX:
     return 2 + max_int(scratch_for_expr(a, node->as.index_expr.target),
                        scratch_for_expr(a, node->as.index_expr.index));
@@ -653,12 +663,10 @@ static void emit_call(Asm *a, ASTNode *node, Loc dest, int next) {
   int add_newline = 0;
   int index = -1;
 
-  int is_array = name_is(name, length, "[array]");
-  int is_print = !is_array && is_print_builtin(name, length, &add_newline);
-  int is_native =
-      !is_array && !is_print && ffi_lookup_native(name, length) != NULL;
+  int is_print = is_print_builtin(name, length, &add_newline);
+  int is_native = !is_print && ffi_lookup_native(name, length) != NULL;
 
-  if (!is_array && !is_print && !is_native) {
+  if (!is_print && !is_native) {
     index = find_function(a, name, length);
     if (index < 0) {
       /* Deferred to run time, as in the VM: a script that never reaches this
@@ -688,13 +696,6 @@ static void emit_call(Asm *a, ASTNode *node, Loc dest, int next) {
 
   Loc args = loc_scratch(a, next);
 
-  if (is_array) {
-    arg_addr(a, 0, dest);
-    arg_i32(a, 1, argc);
-    arg_addr(a, 2, args);
-    call(a, "HDArrayNewX");
-    return;
-  }
   if (is_print) {
     arg_addr(a, 0, dest);
     arg_i32(a, 1, argc);
@@ -718,6 +719,18 @@ static void emit_call(Asm *a, ASTNode *node, Loc dest, int next) {
   for (int i = 0; i < argc; i++)
     arg_addr(a, i + 1, loc_scratch(a, next + i));
   call(a, symbol);
+}
+
+static void emit_array_literal(Asm *a, ASTNode *node, Loc dest, int next) {
+  int count = node->as.array_literal.element_count;
+  for (int i = 0; i < count; i++) {
+    emit_expr(a, node->as.array_literal.elements[i], loc_scratch(a, next + i),
+              next + count);
+  }
+  arg_addr(a, 0, dest);
+  arg_i32(a, 1, count);
+  arg_addr(a, 2, loc_scratch(a, next));
+  call(a, "HDArrayNewX");
 }
 
 /* ---------------- Expressions --------------------------------------------- */
@@ -856,6 +869,10 @@ static void emit_expr(Asm *a, ASTNode *node, Loc dest, int next) {
 
   case AST_CALL:
     emit_call(a, node, dest, next);
+    break;
+
+  case AST_ARRAY_LITERAL:
+    emit_array_literal(a, node, dest, next);
     break;
 
   case AST_INDEX:
@@ -1237,13 +1254,14 @@ static int calls_name(ASTNode *node, const char *name, int len) {
     return 0;
   switch (node->type) {
   case AST_CALL:
-    if (name_is(node->as.call.callee_name, node->as.call.callee_name_length,
-                "[array]") == 0 &&
-        node->as.call.callee_name_length == len &&
+    if (node->as.call.callee_name_length == len &&
         strncmp(node->as.call.callee_name, name, (size_t)len) == 0)
       return 1;
     return any_calls_name(node->as.call.arguments,
                           node->as.call.argument_count, name, len);
+  case AST_ARRAY_LITERAL:
+    return any_calls_name(node->as.array_literal.elements,
+                          node->as.array_literal.element_count, name, len);
   case AST_VAR_REF:
     return node->as.variable_ref.name_length == len &&
            strncmp(node->as.variable_ref.name, name, (size_t)len) == 0;

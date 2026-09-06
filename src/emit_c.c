@@ -40,6 +40,8 @@
 typedef struct {
   FILE *out;
   const HDResolution *resolution;
+  const HDTypeCheck *types;
+  unsigned char *unsafe_symbols;
   ASTNode **functions; /* AST_FUNC_DECL nodes, in source order */
   int function_count;
   int temp_counter;  /* reset per emitted C function */
@@ -176,6 +178,191 @@ static void write_env_name(Emitter *e, const char *name, int length) {
   fprintf(e->out, ", %d", length);
 }
 
+typedef enum {
+  C_REP_BOXED,
+  C_REP_I64,
+  C_REP_F64
+} CRepresentation;
+
+static CRepresentation type_representation(const HDTypeCheck *types,
+                                            HDTypeId id) {
+  const HDType *type = HDTypeGet(types, id);
+  while (type && type->kind == HD_TYPE_QUALIFIED) {
+    id = type->primary;
+    type = HDTypeGet(types, id);
+  }
+  if (!type)
+    return C_REP_BOXED;
+  switch (type->kind) {
+  case HD_TYPE_BOOL:
+  case HD_TYPE_I8:
+  case HD_TYPE_U8:
+  case HD_TYPE_I16:
+  case HD_TYPE_U16:
+  case HD_TYPE_I32:
+  case HD_TYPE_U32:
+  case HD_TYPE_I64:
+  case HD_TYPE_U64:
+    return C_REP_I64;
+  case HD_TYPE_F64:
+    return C_REP_F64;
+  default:
+    return C_REP_BOXED;
+  }
+}
+
+static CRepresentation symbol_representation(Emitter *e,
+                                              const HDSymbol *symbol) {
+  if (!symbol || symbol->storage == HD_SYMBOL_EXTERNAL)
+    return C_REP_BOXED;
+  if (e->unsafe_symbols && e->unsafe_symbols[symbol->id])
+    return C_REP_BOXED;
+  return type_representation(e->types,
+                             HDTypeOfSymbol(e->types, symbol->id));
+}
+
+static CRepresentation node_representation(Emitter *e, const ASTNode *node) {
+  return node ? type_representation(e->types, HDTypeOfNode(e->types, node))
+              : C_REP_BOXED;
+}
+
+static int expression_representation_is_stable(Emitter *e, ASTNode *node,
+                                               CRepresentation expected) {
+  if (!node || node_representation(e, node) != expected)
+    return 0;
+  switch (node->type) {
+  case AST_NUMBER:
+    return expected == C_REP_I64;
+  case AST_FLOAT:
+    return expected == C_REP_F64;
+  case AST_VAR_REF:
+    return symbol_representation(
+               e, symbol_for(e, node, HD_BINDING_READ)) == expected;
+  case AST_BINARY_OP: {
+    TokenType op = node->as.binary_op.operator_type;
+    if (op == TOKEN_TILDE)
+      return 0;
+    CRepresentation left = node_representation(e, node->as.binary_op.left);
+    CRepresentation right = node_representation(e, node->as.binary_op.right);
+    return left != C_REP_BOXED && right != C_REP_BOXED &&
+           expression_representation_is_stable(e, node->as.binary_op.left,
+                                               left) &&
+           expression_representation_is_stable(e, node->as.binary_op.right,
+                                               right);
+  }
+  case AST_UNARY_OP:
+    if (node->as.unary_op.operator_type == TOKEN_BANG)
+      return expected == C_REP_I64;
+    return expression_representation_is_stable(
+        e, node->as.unary_op.operand,
+        node_representation(e, node->as.unary_op.operand));
+  case AST_TERNARY_OP:
+    return expression_representation_is_stable(
+               e, node->as.ternary_op.true_expr, expected) &&
+           expression_representation_is_stable(
+               e, node->as.ternary_op.false_expr, expected);
+  case AST_ARRAY_LEN_EXPR:
+    return expected == C_REP_I64;
+  case AST_CALL: {
+    int newline = 0;
+    return expected == C_REP_I64 &&
+           is_print_builtin(node->as.call.callee_name,
+                            node->as.call.callee_name_length, &newline);
+  }
+  default:
+    return 0;
+  }
+}
+
+/* The checker intentionally accepts legacy boxed-runtime mismatches. Before
+ * choosing native storage, prove that every value which can enter a slot has
+ * the representation its semantic type predicts. This is a monotone pass:
+ * when one slot becomes unsafe, dependent slots become unsafe on the next
+ * iteration. Parameters are treated as typed function boundaries; call ABI
+ * specialization will make that contract explicit in the next step. */
+static int analyze_native_slots(Emitter *e) {
+  int count = e->resolution->symbol_count;
+  e->unsafe_symbols = (unsigned char *)calloc((size_t)count, 1);
+  if (count && !e->unsafe_symbols)
+    return 0;
+
+  for (int i = 0; i < count; i++) {
+    const HDSymbol *symbol = &e->resolution->symbols[i];
+    if (symbol->flags & HD_SYMBOL_FOREACH_VALUE)
+      e->unsafe_symbols[i] = 1;
+  }
+
+  int changed;
+  do {
+    changed = 0;
+    for (int i = 0; i < count; i++) {
+      const HDSymbol *symbol = &e->resolution->symbols[i];
+      CRepresentation representation = symbol_representation(e, symbol);
+      if (representation == C_REP_BOXED ||
+          (symbol->flags & HD_SYMBOL_PARAMETER) ||
+          (symbol->flags & HD_SYMBOL_FOREACH_INDEX))
+        continue;
+
+      ASTNode *declaration = (ASTNode *)symbol->declaration;
+      ASTNode *value = NULL;
+      if (declaration && declaration->type == AST_VAR_DECL)
+        value = declaration->as.variable_decl.initializer;
+      else if (declaration && declaration->type == AST_ASSIGN)
+        value = declaration->as.assignment.value;
+      if (!value ||
+          !expression_representation_is_stable(e, value, representation)) {
+        e->unsafe_symbols[i] = 1;
+        changed = 1;
+      }
+    }
+
+    for (int i = 0; i < e->resolution->binding_count; i++) {
+      const HDBinding *binding = &e->resolution->bindings[i];
+      if (binding->role != HD_BINDING_WRITE)
+        continue;
+      const HDSymbol *symbol =
+          HDResolutionSymbol(e->resolution, binding->symbol_id);
+      CRepresentation representation = symbol_representation(e, symbol);
+      ASTNode *assignment = (ASTNode *)binding->node;
+      if (representation != C_REP_BOXED && assignment &&
+          assignment->type == AST_ASSIGN &&
+          !expression_representation_is_stable(
+              e, assignment->as.assignment.value, representation)) {
+        e->unsafe_symbols[symbol->id] = 1;
+        changed = 1;
+      }
+    }
+  } while (changed);
+  return 1;
+}
+
+static void emit_boxed_slot(Emitter *e, const HDSymbol *symbol) {
+  CRepresentation representation = symbol_representation(e, symbol);
+  if (representation == C_REP_I64)
+    fputs("int_value(", e->out);
+  else if (representation == C_REP_F64)
+    fputs("float_value(", e->out);
+  write_slot_name(e, symbol);
+  if (representation != C_REP_BOXED)
+    fputc(')', e->out);
+}
+
+static void emit_unbox_open(Emitter *e, const HDSymbol *symbol) {
+  CRepresentation representation = symbol_representation(e, symbol);
+  if (representation == C_REP_I64)
+    fputc('(', e->out);
+  else if (representation == C_REP_F64)
+    fputs("HDAsDouble(", e->out);
+}
+
+static void emit_unbox_close(Emitter *e, const HDSymbol *symbol) {
+  CRepresentation representation = symbol_representation(e, symbol);
+  if (representation == C_REP_I64)
+    fputs(").i64", e->out);
+  else if (representation == C_REP_F64)
+    fputc(')', e->out);
+}
+
 /* The global a local defers to while its own slot is unbound, or NULL. */
 static const HDSymbol *global_fallback(Emitter *e, const HDSymbol *symbol) {
   const HDSymbol *fallback =
@@ -196,14 +383,14 @@ static void emit_load(Emitter *e, const HDSymbol *symbol, const char *name,
   }
 
   if (!has_bound_bit(symbol)) {
-    write_slot_name(e, symbol);
+    emit_boxed_slot(e, symbol);
     return;
   }
 
   fputc('(', e->out);
   write_bound_name(e, symbol);
   fputs(" ? ", e->out);
-  write_slot_name(e, symbol);
+  emit_boxed_slot(e, symbol);
   fputs(" : ", e->out);
 
   const HDSymbol *fallback = global_fallback(e, symbol);
@@ -211,7 +398,7 @@ static void emit_load(Emitter *e, const HDSymbol *symbol, const char *name,
     fputc('(', e->out);
     write_bound_name(e, fallback);
     fputs(" ? ", e->out);
-    write_slot_name(e, fallback);
+    emit_boxed_slot(e, fallback);
     fputs(" : ", e->out);
   }
   fputs("HDLoadX(", e->out);
@@ -237,6 +424,7 @@ static void emit_define_open(Emitter *e, const HDSymbol *symbol,
   }
   write_slot_name(e, symbol);
   fputs(" = ", e->out);
+  emit_unbox_open(e, symbol);
 }
 
 static void emit_define_close(Emitter *e, const HDSymbol *symbol) {
@@ -244,6 +432,7 @@ static void emit_define_close(Emitter *e, const HDSymbol *symbol) {
     fputs(");\n", e->out);
     return;
   }
+  emit_unbox_close(e, symbol);
   fputs(";", e->out);
   if (has_bound_bit(symbol)) {
     fputc(' ', e->out);
@@ -271,6 +460,7 @@ static void emit_store_open(Emitter *e, const HDSymbol *symbol,
     *id = -1;
     write_slot_name(e, symbol);
     fputs(" = ", e->out);
+    emit_unbox_open(e, symbol);
     return;
   }
   *id = e->store_counter++;
@@ -281,6 +471,8 @@ static void emit_store_close(Emitter *e, const HDSymbol *symbol,
                              const char *name, int length, int indent,
                              int id) {
   if (id < 0) {
+    if (symbol && symbol->storage != HD_SYMBOL_EXTERNAL)
+      emit_unbox_close(e, symbol);
     fputs(symbol && symbol->storage != HD_SYMBOL_EXTERNAL ? ";\n" : ");\n",
           e->out);
     return;
@@ -294,7 +486,11 @@ static void emit_store_close(Emitter *e, const HDSymbol *symbol,
   write_bound_name(e, symbol);
   fputs(") ", e->out);
   write_slot_name(e, symbol);
-  fprintf(e->out, " = _s%d;\n", id);
+  fputs(" = ", e->out);
+  emit_unbox_open(e, symbol);
+  fprintf(e->out, "_s%d", id);
+  emit_unbox_close(e, symbol);
+  fputs(";\n", e->out);
 
   if (fallback) {
     indent_by(e, indent + 1);
@@ -302,7 +498,11 @@ static void emit_store_close(Emitter *e, const HDSymbol *symbol,
     write_bound_name(e, fallback);
     fputs(") ", e->out);
     write_slot_name(e, fallback);
-    fprintf(e->out, " = _s%d;\n", id);
+    fputs(" = ", e->out);
+    emit_unbox_open(e, fallback);
+    fprintf(e->out, "_s%d", id);
+    emit_unbox_close(e, fallback);
+    fputs(";\n", e->out);
   }
 
   indent_by(e, indent + 1);
@@ -315,7 +515,11 @@ static void emit_store_close(Emitter *e, const HDSymbol *symbol,
   indent_by(e, indent + 1);
   fputs("else { ", e->out);
   write_slot_name(e, symbol);
-  fprintf(e->out, " = _s%d; ", id);
+  fputs(" = ", e->out);
+  emit_unbox_open(e, symbol);
+  fprintf(e->out, "_s%d", id);
+  emit_unbox_close(e, symbol);
+  fputs("; ", e->out);
   write_bound_name(e, symbol);
   fputs(" = 1; }\n", e->out);
 
@@ -370,6 +574,13 @@ static void count_expression(Emitter *e, ASTNode *node, int *max_argc,
     count_call(e, node, node->as.call.argument_count, max_argc, capacity);
     for (int i = 0; i < node->as.call.argument_count; i++)
       count_expression(e, node->as.call.arguments[i], max_argc, capacity);
+    break;
+  case AST_ARRAY_LITERAL:
+    count_call(e, node, node->as.array_literal.element_count, max_argc,
+               capacity);
+    for (int i = 0; i < node->as.array_literal.element_count; i++)
+      count_expression(e, node->as.array_literal.elements[i], max_argc,
+                       capacity);
     break;
   default:
     break;
@@ -494,14 +705,6 @@ static void emit_call_expression(Emitter *e, ASTNode *node) {
   int id = e->temp_counter++;
   int argc = node->as.call.argument_count;
 
-  /* An array literal reaches the compiler as a call to "[array]". */
-  if (name_is(node->as.call.callee_name, node->as.call.callee_name_length, "[array]")) {
-    fputc('(', e->out);
-    emit_args_into(e, id, node->as.call.arguments, argc);
-    fprintf(e->out, "HDArrayNewX(%d, _t%d))", argc, id);
-    return;
-  }
-
   int add_newline = 0;
   if (is_print_builtin(node->as.call.callee_name, node->as.call.callee_name_length, &add_newline)) {
     fputc('(', e->out);
@@ -550,6 +753,14 @@ static void emit_call_expression(Emitter *e, ASTNode *node) {
   fputs("))", e->out);
 }
 
+static void emit_array_expression(Emitter *e, ASTNode *node) {
+  int id = e->temp_counter++;
+  int count = node->as.array_literal.element_count;
+  fputc('(', e->out);
+  emit_args_into(e, id, node->as.array_literal.elements, count);
+  fprintf(e->out, "HDArrayNewX(%d, _t%d))", count, id);
+}
+
 static const char *binop_name(TokenType op) {
   switch (op) {
   case TOKEN_PLUS:
@@ -595,6 +806,193 @@ static const char *binop_name(TokenType op) {
   }
 }
 
+static const char *direct_binop(TokenType op) {
+  switch (op) {
+  case TOKEN_PLUS: return "+";
+  case TOKEN_MINUS: return "-";
+  case TOKEN_STAR: return "*";
+  case TOKEN_EQEQ: return "==";
+  case TOKEN_NEQ: return "!=";
+  case TOKEN_LT: return "<";
+  case TOKEN_GT: return ">";
+  case TOKEN_LTEQ: return "<=";
+  case TOKEN_GTEQ: return ">=";
+  default: return NULL;
+  }
+}
+
+static int direct_scalar_expression(Emitter *e, ASTNode *node) {
+  if (!node || node_representation(e, node) == C_REP_BOXED)
+    return 0;
+  switch (node->type) {
+  case AST_BINARY_OP:
+    {
+      CRepresentation left =
+          node_representation(e, node->as.binary_op.left);
+      CRepresentation right =
+          node_representation(e, node->as.binary_op.right);
+      return direct_binop(node->as.binary_op.operator_type) != NULL &&
+             left != C_REP_BOXED && right != C_REP_BOXED &&
+             expression_representation_is_stable(
+                 e, node->as.binary_op.left, left) &&
+             expression_representation_is_stable(
+                 e, node->as.binary_op.right, right);
+    }
+  case AST_UNARY_OP:
+    return node->as.unary_op.operator_type == TOKEN_MINUS &&
+           expression_representation_is_stable(
+               e, node->as.unary_op.operand,
+               node_representation(e, node->as.unary_op.operand));
+  case AST_TERNARY_OP:
+    /* The boxed runtime preserves the selected arm's representation. A
+     * mixed I64/F64 conditional therefore cannot be specialized yet even
+     * though semantic common-type inference reports F64. */
+    return expression_representation_is_stable(
+               e, node->as.ternary_op.true_expr,
+               node_representation(e, node)) &&
+           expression_representation_is_stable(
+               e, node->as.ternary_op.false_expr,
+               node_representation(e, node));
+  default:
+    return 0;
+  }
+}
+
+static void emit_scalar_value(Emitter *e, ASTNode *node,
+                              CRepresentation wanted);
+
+static void emit_direct_scalar_body(Emitter *e, ASTNode *node) {
+  CRepresentation result = node_representation(e, node);
+  switch (node->type) {
+  case AST_BINARY_OP: {
+    const char *op = direct_binop(node->as.binary_op.operator_type);
+    CRepresentation left = node_representation(e, node->as.binary_op.left);
+    CRepresentation right = node_representation(e, node->as.binary_op.right);
+    int comparison = node->as.binary_op.operator_type == TOKEN_EQEQ ||
+                     node->as.binary_op.operator_type == TOKEN_NEQ ||
+                     node->as.binary_op.operator_type == TOKEN_LT ||
+                     node->as.binary_op.operator_type == TOKEN_GT ||
+                     node->as.binary_op.operator_type == TOKEN_LTEQ ||
+                     node->as.binary_op.operator_type == TOKEN_GTEQ;
+    CRepresentation operands =
+        left == C_REP_F64 || right == C_REP_F64 ? C_REP_F64 : C_REP_I64;
+    if (!comparison)
+      operands = result;
+    fputc('(', e->out);
+    emit_scalar_value(e, node->as.binary_op.left, operands);
+    fprintf(e->out, " %s ", op);
+    emit_scalar_value(e, node->as.binary_op.right, operands);
+    fputc(')', e->out);
+    break;
+  }
+  case AST_UNARY_OP:
+    fputs("(-", e->out);
+    emit_scalar_value(e, node->as.unary_op.operand, result);
+    fputc(')', e->out);
+    break;
+  case AST_TERNARY_OP:
+    fputs("(HDTruthy(", e->out);
+    emit_expression(e, node->as.ternary_op.condition);
+    fputs(") ? ", e->out);
+    emit_scalar_value(e, node->as.ternary_op.true_expr, result);
+    fputs(" : ", e->out);
+    emit_scalar_value(e, node->as.ternary_op.false_expr, result);
+    fputc(')', e->out);
+    break;
+  default:
+    emit_error(e, "internal direct-scalar mismatch.");
+    fputc('0', e->out);
+    break;
+  }
+}
+
+/* Produce an unboxed scalar at a typed boundary. Directly read parameters,
+ * literals, and recursively-specialized arithmetic; less certain constructs
+ * still use their boxed implementation and are unwrapped once. */
+static void emit_scalar_value(Emitter *e, ASTNode *node,
+                              CRepresentation wanted) {
+  CRepresentation actual = node_representation(e, node);
+  int convert = actual != wanted && actual != C_REP_BOXED;
+  if (convert)
+    fputs(wanted == C_REP_F64 ? "((double)" : "((long long)", e->out);
+
+  if (node && node->type == AST_NUMBER) {
+    fprintf(e->out, "%lldLL", node->as.integer_literal.value);
+  } else if (node && node->type == AST_FLOAT) {
+    fprintf(e->out, "((double)%.17g)", node->as.float_literal.value);
+  } else if (node && node->type == AST_VAR_REF) {
+    const HDSymbol *symbol = symbol_for(e, node, HD_BINDING_READ);
+    CRepresentation symbol_rep = symbol_representation(e, symbol);
+    if (symbol_rep != C_REP_BOXED) {
+      if (!has_bound_bit(symbol)) {
+        write_slot_name(e, symbol);
+      } else {
+        fputc('(', e->out);
+        write_bound_name(e, symbol);
+        fputs(" ? ", e->out);
+        write_slot_name(e, symbol);
+        fputs(" : ", e->out);
+        const HDSymbol *fallback = global_fallback(e, symbol);
+        if (fallback) {
+          fputc('(', e->out);
+          write_bound_name(e, fallback);
+          fputs(" ? ", e->out);
+          if (symbol_representation(e, fallback) == wanted) {
+            write_slot_name(e, fallback);
+          } else if (wanted == C_REP_F64) {
+            fputs("HDAsDouble(", e->out);
+            emit_boxed_slot(e, fallback);
+            fputc(')', e->out);
+          } else {
+            fputc('(', e->out);
+            emit_boxed_slot(e, fallback);
+            fputs(").i64", e->out);
+          }
+          fputs(" : ", e->out);
+        }
+        if (wanted == C_REP_F64)
+          fputs("HDAsDouble(HDLoadX(", e->out);
+        else
+          fputs("(HDLoadX(", e->out);
+        write_env_name(e, node->as.variable_ref.name,
+                       node->as.variable_ref.name_length);
+        fputs(wanted == C_REP_F64 ? "))" : ")).i64", e->out);
+        if (fallback)
+          fputc(')', e->out);
+        fputc(')', e->out);
+      }
+    } else if (wanted == C_REP_F64) {
+      fputs("HDAsDouble(", e->out);
+      emit_expression(e, node);
+      fputc(')', e->out);
+    } else {
+      fputc('(', e->out);
+      emit_expression(e, node);
+      fputs(").i64", e->out);
+    }
+  } else if (direct_scalar_expression(e, node)) {
+    emit_direct_scalar_body(e, node);
+  } else if (wanted == C_REP_F64) {
+    fputs("HDAsDouble(", e->out);
+    emit_expression(e, node);
+    fputc(')', e->out);
+  } else {
+    fputc('(', e->out);
+    emit_expression(e, node);
+    fputs(").i64", e->out);
+  }
+
+  if (convert)
+    fputc(')', e->out);
+}
+
+static void emit_boxed_direct_scalar(Emitter *e, ASTNode *node) {
+  CRepresentation representation = node_representation(e, node);
+  fputs(representation == C_REP_F64 ? "float_value(" : "int_value(", e->out);
+  emit_direct_scalar_body(e, node);
+  fputc(')', e->out);
+}
+
 static void emit_expression(Emitter *e, ASTNode *node) {
   if (!node) {
     fputs("int_value(0)", e->out);
@@ -638,6 +1036,11 @@ static void emit_expression(Emitter *e, ASTNode *node) {
       break;
     }
 
+    if (direct_scalar_expression(e, node)) {
+      emit_boxed_direct_scalar(e, node);
+      break;
+    }
+
     const char *op = binop_name(node->as.binary_op.operator_type);
     if (!op) {
       emit_error(e, "unsupported binary operator.");
@@ -660,9 +1063,13 @@ static void emit_expression(Emitter *e, ASTNode *node) {
 
   case AST_UNARY_OP:
     if (node->as.unary_op.operator_type == TOKEN_MINUS) {
-      fputs("HDBinaryX(HD_SUB, int_value(0), ", e->out);
-      emit_expression(e, node->as.unary_op.operand);
-      fputc(')', e->out);
+      if (direct_scalar_expression(e, node))
+        emit_boxed_direct_scalar(e, node);
+      else {
+        fputs("HDBinaryX(HD_SUB, int_value(0), ", e->out);
+        emit_expression(e, node->as.unary_op.operand);
+        fputc(')', e->out);
+      }
     } else if (node->as.unary_op.operator_type == TOKEN_BANG) {
       fputs("HDNot(", e->out);
       emit_expression(e, node->as.unary_op.operand);
@@ -674,13 +1081,17 @@ static void emit_expression(Emitter *e, ASTNode *node) {
     break;
 
   case AST_TERNARY_OP:
-    fputs("(HDTruthy(", e->out);
-    emit_expression(e, node->as.ternary_op.condition);
-    fputs(") ? ", e->out);
-    emit_expression(e, node->as.ternary_op.true_expr);
-    fputs(" : ", e->out);
-    emit_expression(e, node->as.ternary_op.false_expr);
-    fputc(')', e->out);
+    if (direct_scalar_expression(e, node)) {
+      emit_boxed_direct_scalar(e, node);
+    } else {
+      fputs("(HDTruthy(", e->out);
+      emit_expression(e, node->as.ternary_op.condition);
+      fputs(") ? ", e->out);
+      emit_expression(e, node->as.ternary_op.true_expr);
+      fputs(" : ", e->out);
+      emit_expression(e, node->as.ternary_op.false_expr);
+      fputc(')', e->out);
+    }
     break;
 
   case AST_INDEX:
@@ -699,6 +1110,10 @@ static void emit_expression(Emitter *e, ASTNode *node) {
 
   case AST_CALL:
     emit_call_expression(e, node);
+    break;
+
+  case AST_ARRAY_LITERAL:
+    emit_array_expression(e, node);
     break;
 
   default:
@@ -728,10 +1143,25 @@ static void emit_statement(Emitter *e, ASTNode *node, int indent) {
   switch (node->type) {
   case AST_VAR_DECL: {
     const HDSymbol *symbol = symbol_for(e, node, HD_BINDING_DECLARATION);
-    emit_define_open(e, symbol, node->as.variable_decl.name,
-                     node->as.variable_decl.name_length, indent);
-    emit_expression(e, node->as.variable_decl.initializer);
-    emit_define_close(e, symbol);
+    CRepresentation representation = symbol_representation(e, symbol);
+    if (representation != C_REP_BOXED) {
+      indent_by(e, indent);
+      write_slot_name(e, symbol);
+      fputs(" = ", e->out);
+      emit_scalar_value(e, node->as.variable_decl.initializer, representation);
+      fputs(";", e->out);
+      if (has_bound_bit(symbol)) {
+        fputc(' ', e->out);
+        write_bound_name(e, symbol);
+        fputs(" = 1;", e->out);
+      }
+      fputc('\n', e->out);
+    } else {
+      emit_define_open(e, symbol, node->as.variable_decl.name,
+                       node->as.variable_decl.name_length, indent);
+      emit_expression(e, node->as.variable_decl.initializer);
+      emit_define_close(e, symbol);
+    }
     break;
   }
 
@@ -966,14 +1396,17 @@ static int expr_calls(Emitter *e, ASTNode *node, const char *name, int len) {
   case AST_ARRAY_LEN_EXPR:
     return expr_calls(e, node->as.array_length_expr.target, name, len);
   case AST_CALL:
-    if (name_is(node->as.call.callee_name, node->as.call.callee_name_length, "[array]")) {
-      /* not a call to a named function, but its arguments still are */
-    } else if (node->as.call.callee_name_length == len &&
-               strncmp(node->as.call.callee_name, name, (size_t)len) == 0) {
+    if (node->as.call.callee_name_length == len &&
+        strncmp(node->as.call.callee_name, name, (size_t)len) == 0) {
       return 1;
     }
     for (int i = 0; i < node->as.call.argument_count; i++)
       if (expr_calls(e, node->as.call.arguments[i], name, len))
+        return 1;
+    return 0;
+  case AST_ARRAY_LITERAL:
+    for (int i = 0; i < node->as.array_literal.element_count; i++)
+      if (expr_calls(e, node->as.array_literal.elements[i], name, len))
         return 1;
     return 0;
   default:
@@ -1056,12 +1489,25 @@ static void declare_frame(Emitter *e, const HDResolvedFunction *scope,
     }
 
     indent_by(e, indent);
-    fputs("HDValue ", e->out);
+    CRepresentation representation = symbol_representation(e, symbol);
+    fputs(representation == C_REP_I64 ? "long long "
+          : representation == C_REP_F64 ? "double "
+                                        : "HDValue ",
+          e->out);
     write_slot_name(e, symbol);
-    if (parameter >= 0)
-      fprintf(e->out, " = p%d;\n", parameter);
-    else
+    if (parameter >= 0) {
+      fputs(" = ", e->out);
+      if (representation == C_REP_I64)
+        fprintf(e->out, "p%d.i64;\n", parameter);
+      else if (representation == C_REP_F64)
+        fprintf(e->out, "HDAsDouble(p%d);\n", parameter);
+      else
+        fprintf(e->out, "p%d;\n", parameter);
+    } else if (representation == C_REP_BOXED) {
       fputs(" = {0};\n", e->out);
+    } else {
+      fputs(" = 0;\n", e->out);
+    }
 
     if (has_bound_bit(symbol)) {
       indent_by(e, indent);
@@ -1111,11 +1557,13 @@ static void emit_function(Emitter *e, int index) {
   e->scope = -1;
 }
 
-int HDEmitC(ASTNode *ast, const HDResolution *resolution, FILE *out,
-            const char *source_name) {
+int HDEmitC(ASTNode *ast, const HDResolution *resolution,
+            const HDTypeCheck *types, FILE *out, const char *source_name) {
   Emitter e;
   e.out = out;
   e.resolution = resolution;
+  e.types = types;
+  e.unsafe_symbols = NULL;
   e.functions = NULL;
   e.function_count = 0;
   e.temp_counter = 0;
@@ -1139,6 +1587,12 @@ int HDEmitC(ASTNode *ast, const HDResolution *resolution, FILE *out,
     ASTNode *stmt = ast->as.block.statements[i];
     if (stmt && stmt->type == AST_FUNC_DECL)
       e.functions[e.function_count++] = stmt;
+  }
+
+  if (!analyze_native_slots(&e)) {
+    emit_error(&e, "out of memory while selecting native scalar slots.");
+    free(e.functions);
+    return 0;
   }
 
   fprintf(out, "/* Generated by holyd --emit-c from %s. Do not edit.\n",
@@ -1168,7 +1622,11 @@ int HDEmitC(ASTNode *ast, const HDResolution *resolution, FILE *out,
       const HDSymbol *symbol = HDResolutionSlotSymbol(resolution, -1, slot);
       if (!symbol)
         continue;
-      fputs("static HDValue ", out);
+      CRepresentation representation = symbol_representation(&e, symbol);
+      fputs(representation == C_REP_I64 ? "static long long "
+            : representation == C_REP_F64 ? "static double "
+                                          : "static HDValue ",
+            out);
       write_slot_name(&e, symbol);
       fputs(";\n", out);
       fputs("static int ", out);
@@ -1221,6 +1679,7 @@ int HDEmitC(ASTNode *ast, const HDResolution *resolution, FILE *out,
         (ASTNode **)malloc(sizeof(ASTNode *) * (size_t)(ast->as.block.statement_count + 1));
     if (!stmts) {
       emit_error(&e, "out of memory while collecting top-level statements.");
+      free(e.unsafe_symbols);
       free(e.functions);
       return 0;
     }
@@ -1266,6 +1725,7 @@ int HDEmitC(ASTNode *ast, const HDResolution *resolution, FILE *out,
   fputs("}\n", out);
 
   free(top.as.block.statements);
+  free(e.unsafe_symbols);
   free(e.functions);
   return !e.had_error;
 }

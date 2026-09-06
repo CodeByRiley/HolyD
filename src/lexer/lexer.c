@@ -10,17 +10,21 @@ static int is_alpha(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <=
 static int is_alnum(char c) { return is_alpha(c) || is_digit(c); }
 static int is_space(char c) { return c == ' ' || c == '\t' || c == '\r'; }
 
-static int string_match(const char* a, const char* b, int len) {
-    for (int i = 0; i < len; i++) {
+static int string_match(const char* a, const char* b, size_t len) {
+    for (size_t i = 0; i < len; i++) {
         if (a[i] != b[i]) return 0;
     }
     return 1;
 }
 
 void LexerInit(Lexer* lexer, const char* source) {
+    lexer->source = source;
     lexer->start = source;
     lexer->current = source;
     lexer->line = 1;
+    lexer->column = 1;
+    lexer->token_line = 1;
+    lexer->token_column = 1;
 }
 
 static Token make_token(Lexer* lexer, TokenType type) {
@@ -28,12 +32,24 @@ static Token make_token(Lexer* lexer, TokenType type) {
     token.type = type;
     token.start = lexer->start;
     token.length = (int)(lexer->current - lexer->start);
+    token.span.start_offset = (size_t)(lexer->start - lexer->source);
+    token.span.end_offset = (size_t)(lexer->current - lexer->source);
+    token.span.start_line = lexer->token_line;
+    token.span.start_column = lexer->token_column;
+    token.span.end_line = lexer->line;
+    token.span.end_column = lexer->column;
     return token;
 }
 
 static char advance(Lexer* lexer) {
-    lexer->current++;
-    return lexer->current[-1];
+    char c = *lexer->current++;
+    if (c == '\n') {
+        lexer->line++;
+        lexer->column = 1;
+    } else {
+        lexer->column++;
+    }
+    return c;
 }
 
 static char peek(Lexer* lexer) {
@@ -47,7 +63,7 @@ static char peek_next(Lexer* lexer) {
 
 static int match(Lexer* lexer, char expected) {
     if (*lexer->current == expected) {
-        lexer->current++;
+        advance(lexer);
         return 1;
     }
     return 0;
@@ -59,7 +75,6 @@ static void skip_whitespace(Lexer* lexer) {
         if (is_space(c)) {
             advance(lexer);
         } else if (c == '\n') {
-            lexer->line++;
             advance(lexer);
         } else if (c == '/' && peek_next(lexer) == '/') {
             // Skip line comments
@@ -70,7 +85,6 @@ static void skip_whitespace(Lexer* lexer) {
             advance(lexer);
             advance(lexer);
             while (!(peek(lexer) == '*' && peek_next(lexer) == '/') && peek(lexer) != '\0') {
-                if (peek(lexer) == '\n') lexer->line++;
                 advance(lexer);
             }
             if (peek(lexer) == '*') {
@@ -85,7 +99,6 @@ static void skip_whitespace(Lexer* lexer) {
 
 static Token string(Lexer* lexer) {
     while (peek(lexer) != '"' && peek(lexer) != '\0') {
-        if (peek(lexer) == '\n') lexer->line++;
         advance(lexer);
     }
 
@@ -131,7 +144,7 @@ static Token identifier(Lexer* lexer) {
         advance(lexer);
     }
 
-    int length = (int)(lexer->current - lexer->start);
+    size_t length = (size_t)(lexer->current - lexer->start);
 
     switch (length) {
       case 2:
@@ -139,7 +152,6 @@ static Token identifier(Lexer* lexer) {
         if (string_match(lexer->start, "U8", 2)) return make_token(lexer, TOKEN_U8);
         if (string_match(lexer->start, "I8", 2)) return make_token(lexer, TOKEN_I8);
         if (string_match(lexer->start, "if", 2)) return make_token(lexer, TOKEN_IF);
-
         break;
       case 3:
         if (string_match(lexer->start, "I16", 3)) return make_token(lexer, TOKEN_I16);
@@ -200,16 +212,16 @@ static Token identifier(Lexer* lexer) {
 Token LexerNextToken(Lexer* lexer) {
     skip_whitespace(lexer);
     lexer->start = lexer->current;
+    lexer->token_line = lexer->line;
+    lexer->token_column = lexer->column;
 
     if (peek(lexer) == '\0') return make_token(lexer, TOKEN_EOF);
 
     char c = advance(lexer);
 
     if (c == '\n') {
-        lexer->line++;
         // Consume any consecutive newlines so we only emit ONE TOKEN_NEWLINE
         while (peek(lexer) == '\n') {
-            lexer->line++;
             advance(lexer);
         }
         return make_token(lexer, TOKEN_NEWLINE);

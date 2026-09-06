@@ -17,6 +17,7 @@ typedef enum {
     AST_UNARY_OP,       // !expr, -expr
     AST_TERNARY_OP,     // cond ? expr : expr
     AST_CALL,           // Print(expr)
+    AST_ARRAY_LITERAL,  // [expr, expr]
     AST_INDEX,          // array[index]
     AST_ARRAY_LEN_EXPR, // array.length
     AST_BLOCK,          // { statement1; statement2; }
@@ -32,6 +33,7 @@ typedef enum {
 
 typedef struct {
     long long value;
+    int is_boolean;
 } ASTIntegerLiteral;
 
 typedef struct {
@@ -111,6 +113,11 @@ typedef struct {
 } ASTCall;
 
 typedef struct {
+    ASTNode** elements;
+    int element_count;
+} ASTArrayLiteral;
+
+typedef struct {
     ASTNode** statements;
     int statement_count;
 } ASTBlock;
@@ -159,6 +166,7 @@ typedef struct {
 
 struct ASTNode {
     ASTNodeType type;
+    HDSourceSpan span;
     union {
         ASTIntegerLiteral integer_literal;
         ASTFloatLiteral float_literal;
@@ -173,6 +181,7 @@ struct ASTNode {
         ASTIndexExpr index_expr;
         ASTArrayLengthExpr array_length_expr;
         ASTCall call;
+        ASTArrayLiteral array_literal;
         ASTBlock block;
         ASTIfStatement if_statement;
         ASTWhileStatement while_statement;
@@ -185,8 +194,12 @@ struct ASTNode {
     } as;
 };
 
+HDSourceSpan HDSourceSpanCover(HDSourceSpan first, HDSourceSpan last);
+ASTNode* ASTSetSpan(ASTNode* node, HDSourceSpan span);
+
 // Helper functions to create nodes (allocates memory)
 ASTNode* ASTNewNumber(long long val);
+ASTNode* ASTNewBoolean(int value);
 ASTNode* ASTNewFloat(double val);
 ASTNode* ASTNewString(const char* str, int len);
 ASTNode* ASTNewVarRef(const char* name, int len);
@@ -202,6 +215,7 @@ ASTNode* ASTNewIndex(ASTNode* target, ASTNode* index);
 ASTNode* ASTNewIndexAssign(ASTNode* target, ASTNode* index, ASTNode* value);
 ASTNode* ASTNewArrayLenExpr(ASTNode* target);
 ASTNode* ASTNewCall(const char* name, int len, ASTNode** args, int arg_count);
+ASTNode* ASTNewArrayLiteral(ASTNode** elements, int element_count);
 ASTNode* ASTNewBlock(ASTNode** stmts, int count);
 ASTNode* ASTNewIf(ASTNode* cond, ASTNode* then_block, ASTNode* else_block);
 ASTNode* ASTNewWhile(ASTNode* cond, ASTNode* body);

@@ -10,6 +10,7 @@
 #include "parser/parser.h"
 #include "emit_asm.h"
 #include "resolve.h"
+#include "typecheck.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -288,11 +289,16 @@ int test(const char *dir) {
       failure++;
     } else {
       HDResolution resolution;
+      HDTypeCheck types;
       HDProgram bytecode;
+      HDTypeCheckInit(&types);
       HDProgramInit(&bytecode);
 
       if (!HDResolveProgram(program, &resolution)) {
         printf("holyd: failed to resolve %s\n", full_path);
+        failure++;
+      } else if (!HDTypeCheckProgram(program, &resolution, &types)) {
+        printf("holyd: failed to type-check %s\n", full_path);
         failure++;
       } else if (!HDCompileProgram(program, &resolution, &bytecode)) {
         printf("holyd: failed to compile %s\n", full_path);
@@ -304,6 +310,7 @@ int test(const char *dir) {
         printf("holyd: passed %s\n", full_path);
         success++;
       }
+      HDTypeCheckFree(&types);
       HDResolutionFree(&resolution);
     }
 
@@ -330,6 +337,8 @@ static void print_usage(void) {
   printf("  %-16s %s\n", "-ast", "Print the parsed AST and exit");
   printf("  %-16s %s\n", "--dump-symbols",
          "Print resolved names and frame slots, then exit");
+  printf("  %-16s %s\n", "--dump-types",
+         "Print inferred semantic types, then exit");
   printf("  %-16s %s\n", "--emit-asm",
          "Translate to x86-64 assembly instead of running it");
   printf("  %-16s %s\n", "--interpret", "Walk the AST instead of running bytecode");
@@ -378,12 +387,15 @@ static void dump_tokens(const char *source) {
     // A newline token would otherwise break the one-token-per-line layout,
     // and EOF has no text to show at all.
     if (token.type == TOKEN_NEWLINE) {
-      printf("%4zu  %-16s '\\n'\n", lexer.line, TokenTypeToString(token.type));
+      printf("%4zu:%-3zu %-16s '\\n'\n", token.span.start_line,
+             token.span.start_column, TokenTypeToString(token.type));
     } else if (token.type == TOKEN_EOF) {
-      printf("%4zu  %-16s\n", lexer.line, TokenTypeToString(token.type));
+      printf("%4zu:%-3zu %-16s\n", token.span.start_line,
+             token.span.start_column, TokenTypeToString(token.type));
       break;
     } else {
-      printf("%4zu  %-16s '%.*s'\n", lexer.line, TokenTypeToString(token.type),
+      printf("%4zu:%-3zu %-16s '%.*s'\n", token.span.start_line,
+             token.span.start_column, TokenTypeToString(token.type),
              (int)token.length, token.start);
     }
   }
@@ -395,6 +407,7 @@ int main(int argc, char **argv) {
   int tokens_only = 0;
   int ast_only = 0;
   int dump_symbols = 0;
+  int dump_types = 0;
   int run_tests = 0;
   int emit_c = 0;
   int emit_asm = 0;
@@ -439,6 +452,10 @@ int main(int argc, char **argv) {
     }
     if (strcmp(arg, "--dump-symbols") == 0) {
       dump_symbols = 1;
+      continue;
+    }
+    if (strcmp(arg, "--dump-types") == 0) {
+      dump_types = 1;
       continue;
     }
     if (strcmp(arg, "--emit-c") == 0) {
@@ -535,6 +552,22 @@ int main(int argc, char **argv) {
     return 0;
   }
 
+  HDTypeCheck types;
+  if (!HDTypeCheckProgram(program, &resolution, &types)) {
+    HDTypeCheckFree(&types);
+    HDResolutionFree(&resolution);
+    free(source);
+    return 1;
+  }
+
+  if (dump_types) {
+    HDTypeCheckPrint(&types, &resolution, program);
+    HDTypeCheckFree(&types);
+    HDResolutionFree(&resolution);
+    free(source);
+    return 0;
+  }
+
   if (emit_c || emit_asm) {
     /* Default output name is the source with its extension swapped, so
      * `holyd --emit-c samples/gui.hd` lands at samples/gui.c, and
@@ -546,6 +579,7 @@ int main(int argc, char **argv) {
       derived = malloc(len + 3); /* ".hd" -> ".c" never grows, but be safe */
       if (derived == NULL) {
         printf("Error: out of memory choosing an output name.\n");
+        HDTypeCheckFree(&types);
         HDResolutionFree(&resolution);
         free(source);
         return 1;
@@ -560,18 +594,20 @@ int main(int argc, char **argv) {
     if (out == NULL) {
       printf("Error: could not open '%s' for writing\n", target);
       free(derived);
+      HDTypeCheckFree(&types);
       HDResolutionFree(&resolution);
       free(source);
       return 1;
     }
 
     int ok = emit_asm ? HDEmitAsm(program, &resolution, out, source_path)
-                      : HDEmitC(program, &resolution, out, source_path);
+                      : HDEmitC(program, &resolution, &types, out, source_path);
     fclose(out);
     if (ok) {
       printf("holyd: wrote %s\n", target);
     }
     free(derived);
+    HDTypeCheckFree(&types);
     HDResolutionFree(&resolution);
     free(source);
     return ok ? 0 : 1;
@@ -590,6 +626,7 @@ int main(int argc, char **argv) {
     HDProgram bytecode;
     HDProgramInit(&bytecode);
     if (!HDCompileProgram(program, &resolution, &bytecode)) {
+      HDTypeCheckFree(&types);
       HDResolutionFree(&resolution);
       free(source);
       return 1;
@@ -598,12 +635,14 @@ int main(int argc, char **argv) {
       HDDumpProgram(&bytecode);
     }
     if (!HDRunProgram(&bytecode)) {
+      HDTypeCheckFree(&types);
       HDResolutionFree(&resolution);
       free(source);
       return 1;
     }
   }
 
+  HDTypeCheckFree(&types);
   HDResolutionFree(&resolution);
   free(source);
   return 0;

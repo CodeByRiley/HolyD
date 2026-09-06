@@ -34,6 +34,7 @@ RUNTIME_SRCS := \
 SRCS := \
 	src/main.c \
 	src/resolve.c \
+	src/typecheck.c \
 	src/compiler.c \
 	src/emit_c.c \
 	src/emit_asm.c \
