@@ -244,6 +244,14 @@ ASTNode* ASTNewReturn(ASTNode* expr) {
     return node;
 }
 
+ASTNode* ASTNewBreak(void) {
+    return ASTNewNode(AST_BREAK);
+}
+
+ASTNode* ASTNewContinue(void) {
+    return ASTNewNode(AST_CONTINUE);
+}
+
 static void ASTPrintIndent(int indent) {
     for (int i = 0; i < indent; i++) {
         fputs("  ", stdout);
@@ -465,6 +473,14 @@ void ASTPrint(const ASTNode* node, int indent) {
         case AST_GOTO:
             printf("GOTO %.*s\n", node->as.goto_statement.target_len,
                    node->as.goto_statement.target);
+            break;
+
+        case AST_BREAK:
+            fputs("BREAK\n", stdout);
+            break;
+
+        case AST_CONTINUE:
+            fputs("CONTINUE\n", stdout);
             break;
 
         case AST_RETURN:

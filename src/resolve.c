@@ -286,6 +286,12 @@ static void visit_children(ASTNode *node,
      * resolve_labels below does that walk, because it needs to track which
      * foreach bodies a statement sits inside and this one does not. */
     break;
+  case AST_BREAK:
+  case AST_CONTINUE:
+    /* No operand, and the loop they leave is the innermost one enclosing
+     * them, which is structure rather than a name. walk_loops below is the
+     * only pass that needs to look at them. */
+    break;
   default:
     break;
   }
@@ -600,6 +606,63 @@ static void walk_labels(Resolver *resolver, ASTNode *node,
   }
 }
 
+/* break and continue bind to the innermost enclosing loop, so the only thing
+ * to check is that there is one. Doing it here rather than in each backend
+ * means the VM, the C emitter and the assembler cannot disagree about it, and
+ * that --interpret rejects the same programs they do.
+ *
+ * Statement structure only, like walk_labels: no expression can contain
+ * either statement, and a function body is walked as its own scope, which is
+ * what stops a loop from lending its context to a function declared inside
+ * it.
+ *
+ * A for's initialiser and increment are parsed as expressions, not
+ * statements, so neither can hold a break and only the body is walked. If
+ * they ever become statement positions, which loop they belong to has to be
+ * decided here first: the three backends put them in three different places
+ * relative to the loop they lower to.
+ */
+static void walk_loops(Resolver *resolver, ASTNode *node, int depth) {
+  if (!node || resolver->result->had_error)
+    return;
+
+  switch (node->type) {
+  case AST_BREAK:
+  case AST_CONTINUE:
+    if (depth == 0) {
+      printf("Resolve error: '%s' is not inside a loop.\n",
+             node->type == AST_BREAK ? "break" : "continue");
+      resolver->result->had_error = 1;
+    }
+    break;
+
+  case AST_BLOCK:
+    for (int i = 0; i < node->as.block.statement_count; i++)
+      walk_loops(resolver, node->as.block.statements[i], depth);
+    break;
+
+  case AST_IF:
+    walk_loops(resolver, node->as.if_statement.then_branch, depth);
+    walk_loops(resolver, node->as.if_statement.else_branch, depth);
+    break;
+
+  case AST_WHILE:
+    walk_loops(resolver, node->as.while_statement.body, depth + 1);
+    break;
+
+  case AST_FOR:
+    walk_loops(resolver, node->as.for_statement.body, depth + 1);
+    break;
+
+  case AST_FOREACH:
+    walk_loops(resolver, node->as.foreach_statement.body, depth + 1);
+    break;
+
+  default:
+    break;
+  }
+}
+
 int HDResolveProgram(ASTNode *program, HDResolution *resolution) {
   HDResolutionInit(resolution);
   if (!program || program->type != AST_BLOCK) {
@@ -680,6 +743,19 @@ int HDResolveProgram(ASTNode *program, HDResolution *resolution) {
       ASTNode *function = (ASTNode *)resolution->functions[i].declaration;
       walk_labels(&resolver, function->as.function_decl.body, NULL, pass == 0);
     }
+  }
+
+  resolver.function_index = HD_NO_FUNCTION;
+  for (int i = 0; i < program->as.block.statement_count; i++) {
+    ASTNode *statement = program->as.block.statements[i];
+    if (!statement || statement->type == AST_FUNC_DECL)
+      continue;
+    walk_loops(&resolver, statement, 0);
+  }
+  for (int i = 0; i < resolution->function_count; i++) {
+    resolver.function_index = i;
+    ASTNode *function = (ASTNode *)resolution->functions[i].declaration;
+    walk_loops(&resolver, function->as.function_decl.body, 0);
   }
 
   build_binding_index(resolution);

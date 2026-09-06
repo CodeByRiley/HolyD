@@ -5,6 +5,21 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* One per loop being compiled, innermost last. Both jump lists hold
+ * addresses of instructions emitted before their target was known: a break
+ * before the loop's exit exists, a continue before the increment does. The
+ * continue target cannot simply be recorded up front, because for and
+ * foreach put their increment after the body, which is exactly where a
+ * naive `jump to the top` would skip it and spin forever. */
+typedef struct {
+  int *break_jumps;
+  int break_count;
+  int break_capacity;
+  int *continue_jumps;
+  int continue_count;
+  int continue_capacity;
+} LoopScope;
+
 typedef struct {
   HDProgram *program;
   const HDResolution *resolution;
@@ -16,6 +31,10 @@ typedef struct {
   PendingGoto *pending_gotos;
   int pending_count;
   int pending_capacity;
+
+  LoopScope *loops;
+  int loop_count;
+  int loop_capacity;
 } Compiler;
 
 static void chunk_init(BytecodeChunk *chunk) {
@@ -211,6 +230,77 @@ static void patch_jump(BytecodeChunk *chunk, int jump_at) {
   if (jump_at >= 0 && jump_at < chunk->count) {
     chunk->code[jump_at].operand = chunk->count;
   }
+}
+
+static void push_loop(Compiler *c) {
+  if (c->loop_count >= c->loop_capacity) {
+    int capacity = c->loop_capacity ? c->loop_capacity * 2 : 4;
+    LoopScope *grown =
+        (LoopScope *)realloc(c->loops, sizeof(LoopScope) * (size_t)capacity);
+    if (!grown) {
+      printf("Compile error: out of memory while entering a loop.\n");
+      c->program->had_error = 1;
+      return;
+    }
+    c->loops = grown;
+    c->loop_capacity = capacity;
+  }
+  LoopScope *loop = &c->loops[c->loop_count++];
+  loop->break_jumps = NULL;
+  loop->break_count = 0;
+  loop->break_capacity = 0;
+  loop->continue_jumps = NULL;
+  loop->continue_count = 0;
+  loop->continue_capacity = 0;
+}
+
+static void record_jump(Compiler *c, int **jumps, int *count, int *capacity,
+                        int jump_at) {
+  if (*count >= *capacity) {
+    int grown_capacity = *capacity ? *capacity * 2 : 4;
+    int *grown = (int *)realloc(*jumps, sizeof(int) * (size_t)grown_capacity);
+    if (!grown) {
+      printf("Compile error: out of memory while recording a loop jump.\n");
+      c->program->had_error = 1;
+      return;
+    }
+    *jumps = grown;
+    *capacity = grown_capacity;
+  }
+  (*jumps)[(*count)++] = jump_at;
+}
+
+/* Patches every jump in `jumps` to land where the chunk has reached, which
+ * is why the caller has to call this at the target and not before it. */
+static void patch_jumps(BytecodeChunk *chunk, int *jumps, int count) {
+  for (int i = 0; i < count; i++)
+    patch_jump(chunk, jumps[i]);
+}
+
+/* NULL only if push_loop could not allocate, which it has already reported.
+ * Going through here keeps that failure from becoming a read of loops[-1]. */
+static LoopScope *current_loop(Compiler *c) {
+  return c->loop_count > 0 ? &c->loops[c->loop_count - 1] : NULL;
+}
+
+static void patch_loop_continues(Compiler *c, BytecodeChunk *chunk) {
+  LoopScope *loop = current_loop(c);
+  if (loop)
+    patch_jumps(chunk, loop->continue_jumps, loop->continue_count);
+}
+
+static void patch_loop_breaks(Compiler *c, BytecodeChunk *chunk) {
+  LoopScope *loop = current_loop(c);
+  if (loop)
+    patch_jumps(chunk, loop->break_jumps, loop->break_count);
+}
+
+static void pop_loop(Compiler *c) {
+  if (c->loop_count <= 0)
+    return;
+  LoopScope *loop = &c->loops[--c->loop_count];
+  free(loop->break_jumps);
+  free(loop->continue_jumps);
 }
 
 static char *make_temp_name(Compiler *compiler, const char *suffix) {
@@ -588,7 +678,12 @@ static void compile_foreach(Compiler *compiler, BytecodeChunk *chunk,
                   node->as.foreach_statement.index_name_length);
   }
 
+  push_loop(compiler);
   compile_statement(compiler, chunk, node->as.foreach_statement.body);
+
+  /* Continue lands on the counter bump, not on the test: the counter is
+   * what ends this loop, so jumping over it would never terminate. */
+  patch_loop_continues(compiler, chunk);
 
   emit_text(chunk, BC_VARIABLE_LOAD, index_name, (int)strlen(index_name));
   emit_int(chunk, 1);
@@ -599,6 +694,8 @@ static void compile_foreach(Compiler *compiler, BytecodeChunk *chunk,
   jump_back.operand = loop_start;
   emit(chunk, jump_back);
   patch_jump(chunk, exit_jump);
+  patch_loop_breaks(compiler, chunk);
+  pop_loop(compiler);
 }
 
 static void compile_statement(Compiler *compiler, BytecodeChunk *chunk,
@@ -653,11 +750,17 @@ static void compile_statement(Compiler *compiler, BytecodeChunk *chunk,
     int loop_start = chunk->count;
     compile_expression(compiler, chunk, node->as.while_statement.condition);
     int exit_jump = emit_jump(chunk, BC_FLOW_JUMP_IF_FALSE);
+    push_loop(compiler);
     compile_statement(compiler, chunk, node->as.while_statement.body);
+    /* A while has nothing between body and test, so continue lands on the
+     * test, which is where the loop restarts anyway. */
+    patch_loop_continues(compiler, chunk);
     Instruction jump_back = make_ins(BC_FLOW_JUMP);
     jump_back.operand = loop_start;
     emit(chunk, jump_back);
     patch_jump(chunk, exit_jump);
+    patch_loop_breaks(compiler, chunk);
+    pop_loop(compiler);
     break;
   }
 
@@ -674,7 +777,12 @@ static void compile_statement(Compiler *compiler, BytecodeChunk *chunk,
     }
     int exit_jump = emit_jump(chunk, BC_FLOW_JUMP_IF_FALSE);
 
+    push_loop(compiler);
     compile_statement(compiler, chunk, node->as.for_statement.body);
+
+    /* Continue runs the increment, so it lands here rather than on the test.
+     * Skipping it would leave the loop variable unchanged and spin. */
+    patch_loop_continues(compiler, chunk);
 
     if (node->as.for_statement.increment) {
       compile_statement(compiler, chunk, node->as.for_statement.increment);
@@ -684,6 +792,8 @@ static void compile_statement(Compiler *compiler, BytecodeChunk *chunk,
     jump_back.operand = loop_start;
     emit(chunk, jump_back);
     patch_jump(chunk, exit_jump);
+    patch_loop_breaks(compiler, chunk);
+    pop_loop(compiler);
     break;
   }
 
@@ -719,6 +829,28 @@ static void compile_statement(Compiler *compiler, BytecodeChunk *chunk,
     declare_label(compiler, chunk,
                   HDResolutionLabelIndex(compiler->resolution, node));
     break;
+
+  /* Both are forward jumps into a target this loop has not emitted yet, so
+   * they are recorded against the innermost loop and patched when it does.
+   * The resolver has already refused either outside a loop; the check here
+   * is what stops that bug from becoming a jump to address -1. */
+  case AST_BREAK:
+  case AST_CONTINUE: {
+    if (compiler->loop_count <= 0) {
+      compile_error(compiler, "break or continue outside a loop.");
+      break;
+    }
+    LoopScope *loop = current_loop(compiler);
+    int jump_at = emit_jump(chunk, BC_FLOW_JUMP);
+    if (node->type == AST_BREAK) {
+      record_jump(compiler, &loop->break_jumps, &loop->break_count,
+                  &loop->break_capacity, jump_at);
+    } else {
+      record_jump(compiler, &loop->continue_jumps, &loop->continue_count,
+                  &loop->continue_capacity, jump_at);
+    }
+    break;
+  }
 
   /* A backward jump has its address already; a forward one waits for the
    * chunk to be finished and is patched then. */
@@ -850,6 +982,9 @@ int HDCompileProgram(ASTNode *ast, const HDResolution *resolution,
   emit_int(&program->main, 0);
   emit_simple(&program->main, BC_FUNCTION_RETURN);
   resolve_and_free_label_scope(&compiler, &program->main);
+  /* Every loop pops its own scope, so this frees the stack itself and not
+   * anything still on it. */
+  free(compiler.loops);
   return !program->had_error;
 }
 

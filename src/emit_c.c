@@ -45,6 +45,10 @@ typedef struct {
   ASTNode **functions; /* AST_FUNC_DECL nodes, in source order */
   int function_count;
   int temp_counter;  /* reset per emitted C function */
+  /* -1 when the innermost loop lowers to a C loop a bare `continue` is
+   * right for; otherwise the id of the label before that loop's increment. */
+  int continue_label;
+  int label_counter;
   int store_counter; /* likewise, for the one-shot value an assignment holds */
   int scope;         /* resolver function index, or -1 at the top level */
   int had_error;
@@ -52,6 +56,29 @@ typedef struct {
 
 static void emit_expression(Emitter *e, ASTNode *node);
 static void emit_statement(Emitter *e, ASTNode *node, int indent);
+
+/* Whether a `continue` in this statement belongs to the loop being emitted.
+ * A nested loop captures its own, so the walk stops at one. It exists to
+ * decide whether to write a continue label: an unreferenced label is a
+ * warning under -Wall, which the transpiled C is compiled with. */
+static int has_own_continue(const ASTNode *node) {
+  if (!node)
+    return 0;
+  switch (node->type) {
+  case AST_CONTINUE:
+    return 1;
+  case AST_BLOCK:
+    for (int i = 0; i < node->as.block.statement_count; i++)
+      if (has_own_continue(node->as.block.statements[i]))
+        return 1;
+    return 0;
+  case AST_IF:
+    return has_own_continue(node->as.if_statement.then_branch) ||
+           has_own_continue(node->as.if_statement.else_branch);
+  default:
+    return 0;
+  }
+}
 
 static void emit_error(Emitter *e, const char *message) {
   printf("Emit error: %s\n", message);
@@ -637,9 +664,11 @@ static void count_statement(Emitter *e, ASTNode *node, int *max_argc,
     break;
   case AST_LABEL:
   case AST_GOTO:
-    /* Neither takes a call-site temporary. Spelled out rather than left to
-     * the default, because this walk and emit_statement have to allocate
-     * ids in lockstep. */
+  case AST_BREAK:
+  case AST_CONTINUE:
+    /* None of these takes a call-site temporary. Spelled out rather than
+     * left to the default, because this walk and emit_statement have to
+     * allocate ids in lockstep. */
     break;
   case AST_STRING:
     count_call(e, node, 1, max_argc, capacity); /* the implicit Print */
@@ -1213,7 +1242,9 @@ static void emit_statement(Emitter *e, ASTNode *node, int indent) {
     }
     break;
 
-  case AST_WHILE:
+  case AST_WHILE: {
+    int outer_continue = e->continue_label;
+    e->continue_label = -1; /* nothing sits between body and test to skip */
     indent_by(e, indent);
     fputs("while (HDTruthy(", e->out);
     emit_expression(e, node->as.while_statement.condition);
@@ -1221,12 +1252,21 @@ static void emit_statement(Emitter *e, ASTNode *node, int indent) {
     emit_body(e, node->as.while_statement.body, indent + 1);
     indent_by(e, indent);
     fputs("}\n", e->out);
+    e->continue_label = outer_continue;
     break;
+  }
 
   /* Written as init + while rather than a C for, because the init and the
    * increment are statements in HolyD, and because it keeps the order the
    * VM uses visible: condition, body, increment. */
-  case AST_FOR:
+  case AST_FOR: {
+    int outer_continue = e->continue_label;
+    /* The increment is emitted at the end of the body, so a bare C
+     * `continue` would jump over it and spin. Continues land on a label in
+     * front of it instead, which is where the VM patches them too. */
+    e->continue_label = has_own_continue(node->as.for_statement.body)
+                            ? e->label_counter++
+                            : -1;
     indent_by(e, indent);
     fputs("{\n", e->out);
     if (node->as.for_statement.initializer)
@@ -1240,13 +1280,19 @@ static void emit_statement(Emitter *e, ASTNode *node, int indent) {
       fputs("while (1) {\n", e->out);
     }
     emit_body(e, node->as.for_statement.body, indent + 2);
+    if (e->continue_label >= 0) {
+      indent_by(e, indent + 2);
+      fprintf(e->out, "_c%d: ;\n", e->continue_label);
+    }
     if (node->as.for_statement.increment)
       emit_statement(e, node->as.for_statement.increment, indent + 2);
     indent_by(e, indent + 1);
     fputs("}\n", e->out);
     indent_by(e, indent);
     fputs("}\n", e->out);
+    e->continue_label = outer_continue;
     break;
+  }
 
   /* The array is snapshotted once and the length re-read each turn, which
    * is what the VM's desugaring does: it stores the array in a temporary
@@ -1254,6 +1300,12 @@ static void emit_statement(Emitter *e, ASTNode *node, int indent) {
    * element is defined before the index, in that order. */
   case AST_FOREACH: {
     int id = e->temp_counter++;
+    int outer_continue = e->continue_label;
+    /* Same reason as for: the counter bump is at the end of the body, and
+     * skipping it would never terminate. */
+    e->continue_label = has_own_continue(node->as.foreach_statement.body)
+                            ? e->label_counter++
+                            : -1;
     indent_by(e, indent);
     fputs("{\n", e->out);
     indent_by(e, indent + 1);
@@ -1286,16 +1338,37 @@ static void emit_statement(Emitter *e, ASTNode *node, int indent) {
 
     emit_body(e, node->as.foreach_statement.body, indent + 2);
 
+    if (e->continue_label >= 0) {
+      indent_by(e, indent + 2);
+      fprintf(e->out, "_c%d: ;\n", e->continue_label);
+    }
     indent_by(e, indent + 2);
     fprintf(e->out, "_fe%d++;\n", id);
     indent_by(e, indent + 1);
     fputs("}\n", e->out);
     indent_by(e, indent);
     fputs("}\n", e->out);
+    e->continue_label = outer_continue;
     break;
   }
 
   case AST_FUNC_DECL:
+    break;
+
+  /* Every HolyD loop lowers to a C loop whose body holds the HolyD body, so
+   * break is C's break in all three cases. Continue is only C's continue
+   * when there is nothing after the body to run first. */
+  case AST_BREAK:
+    indent_by(e, indent);
+    fputs("break;\n", e->out);
+    break;
+
+  case AST_CONTINUE:
+    indent_by(e, indent);
+    if (e->continue_label >= 0)
+      fprintf(e->out, "goto _c%d;\n", e->continue_label);
+    else
+      fputs("continue;\n", e->out);
     break;
 
   /* A trailing `;` because C wants a statement after a label, and a label
@@ -1568,6 +1641,8 @@ int HDEmitC(ASTNode *ast, const HDResolution *resolution,
   e.function_count = 0;
   e.temp_counter = 0;
   e.store_counter = 0;
+  e.continue_label = -1;
+  e.label_counter = 0;
   e.scope = -1;
   e.had_error = 0;
 

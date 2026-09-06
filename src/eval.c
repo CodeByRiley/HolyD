@@ -342,6 +342,17 @@ HDValue EvalNode(ASTNode* node, Environment* env) {
                    "run without --interpret.\n");
             exit(1);
 
+        /* Same reason as goto: leaving a loop early means unwinding out of
+         * the recursion that is running it, and this walker has no way to
+         * signal that. It does not implement while or for either. The VM
+         * and both backends do, and difftest holds those three together. */
+        case AST_BREAK:
+        case AST_CONTINUE:
+            printf("Runtime error: %s is not supported by the tree walker; "
+                   "run without --interpret.\n",
+                   node->type == AST_BREAK ? "break" : "continue");
+            exit(1);
+
         default:
             // Try evaluating as an expression (e.g. a standalone "5 + 5;")
             EvalExpression(node, env);

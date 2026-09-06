@@ -1192,6 +1192,18 @@ static ASTNode* ParseGoto(Parser* parser) {
                         parser->previous.span);
 }
 
+/* `break;` and `continue;` are the keyword and nothing else. The terminator
+ * is optional here as it is everywhere else in the parser, so that
+ * tests/no_semis.hd keeps working. Which loop they leave is settled from the
+ * shape of the tree, not by the parser. */
+static ASTNode* ParseJumpOut(Parser* parser, ASTNode* statement) {
+    HDSourceSpan start = parser->previous.span;
+    if (check(parser, TOKEN_SEMICOLON) || check(parser, TOKEN_NEWLINE)) {
+        advance(parser);
+    }
+    return span_between(statement, start, parser->previous.span);
+}
+
 static ASTNode* ParseStatement(Parser* parser) {
     if (match(parser, TOKEN_MODULE) || match(parser, TOKEN_IMPORT)) {
         return ParseIgnoredDirective(parser);
@@ -1199,6 +1211,9 @@ static ASTNode* ParseStatement(Parser* parser) {
 
     if (match(parser, TOKEN_DOT)) return ParseLabel(parser);
     if (match(parser, TOKEN_GOTO)) return ParseGoto(parser);
+    if (match(parser, TOKEN_BREAK)) return ParseJumpOut(parser, ASTNewBreak());
+    if (match(parser, TOKEN_CONTINUE))
+        return ParseJumpOut(parser, ASTNewContinue());
 
     HDSourceSpan declaration_start = parser->current.span;
     TypeSyntax* declared_type = ParseOptionalDeclarationType(parser);

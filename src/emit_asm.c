@@ -67,6 +67,11 @@ typedef struct {
   int max_args; /* widest outgoing call, sizing the argument area */
 
   int next_label;
+  /* Where a break and a continue in the innermost loop jump, or -1 outside
+   * any loop. Saved and restored around each loop, so nesting works without
+   * a separate stack. */
+  int break_label;
+  int continue_label;
   int had_error;
 } Asm;
 
@@ -621,6 +626,8 @@ static int scratch_for_stmt(Asm *a, ASTNode *node) {
   case AST_FUNC_DECL:
   case AST_LABEL:
   case AST_GOTO:
+  case AST_BREAK:
+  case AST_CONTINUE:
     return 0;
 
   default:
@@ -986,12 +993,20 @@ static void emit_stmt(Asm *a, ASTNode *node, int next) {
   case AST_WHILE: {
     int top = new_label(a);
     int done = new_label(a);
+    int outer_break = a->break_label;
+    int outer_continue = a->continue_label;
     place_label(a, top);
     emit_expr(a, node->as.while_statement.condition, loc_scratch(a, next),
               next + 1);
     emit_truthy(a, loc_scratch(a, next));
     fprintf(a->out, "\tjz .L%d\n", done);
+    /* Nothing runs between the body and the test, so continue is the back
+     * edge itself. */
+    a->break_label = done;
+    a->continue_label = top;
     emit_body(a, node->as.while_statement.body, next);
+    a->break_label = outer_break;
+    a->continue_label = outer_continue;
     jump(a, top);
     place_label(a, done);
     break;
@@ -1010,7 +1025,17 @@ static void emit_stmt(Asm *a, ASTNode *node, int next) {
       emit_truthy(a, loc_scratch(a, next));
       fprintf(a->out, "\tjz .L%d\n", done);
     }
+    int outer_break = a->break_label;
+    int outer_continue = a->continue_label;
+    int next_turn = new_label(a);
+    a->break_label = done;
+    a->continue_label = next_turn;
     emit_body(a, node->as.for_statement.body, next);
+    a->break_label = outer_break;
+    a->continue_label = outer_continue;
+    /* In front of the increment, not the test: a continue that skipped it
+     * would leave the loop variable alone and spin. */
+    place_label(a, next_turn);
     emit_stmt(a, node->as.for_statement.increment, next);
     jump(a, top);
     place_label(a, done);
@@ -1066,8 +1091,18 @@ static void emit_stmt(Asm *a, ASTNode *node, int next) {
                 node->as.foreach_statement.index_name_length, staging);
     }
 
+    int outer_break = a->break_label;
+    int outer_continue = a->continue_label;
+    int next_turn = new_label(a);
+    a->break_label = done;
+    a->continue_label = next_turn;
     emit_body(a, node->as.foreach_statement.body, next + 4);
+    a->break_label = outer_break;
+    a->continue_label = outer_continue;
 
+    /* The counter is what ends this loop, so continue lands in front of the
+     * bump rather than on the test. */
+    place_label(a, next_turn);
     fprintf(a->out, "\tincq %s\n", counter.text);
     jump(a, top);
     place_label(a, done);
@@ -1080,6 +1115,20 @@ static void emit_stmt(Asm *a, ASTNode *node, int next) {
   case AST_LABEL:
     fprintf(a->out, ".Lg%d:\n", HDResolutionLabelIndex(a->resolution, node));
     break;
+
+  /* The resolver has already refused either outside a loop, so a missing
+   * target here would be a bug in this file rather than in the program. */
+  case AST_BREAK:
+  case AST_CONTINUE: {
+    int target =
+        node->type == AST_BREAK ? a->break_label : a->continue_label;
+    if (target < 0) {
+      emit_error(a, "break or continue outside a loop.");
+      break;
+    }
+    jump(a, target);
+    break;
+  }
 
   case AST_GOTO: {
     int label_index = HDResolutionGotoLabel(a->resolution, node);
@@ -1319,6 +1368,8 @@ int HDEmitAsm(ASTNode *ast, const HDResolution *resolution, FILE *out,
   a.out = out;
   a.resolution = resolution;
   a.scope = -1;
+  a.break_label = -1;
+  a.continue_label = -1;
 
   if (!ast || ast->type != AST_BLOCK) {
     emit_error(&a, "program root is not a block.");

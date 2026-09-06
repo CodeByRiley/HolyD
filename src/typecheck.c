@@ -567,6 +567,8 @@ static void check_stmt(Checker *checker, ASTNode *node) {
     break;
   case AST_LABEL:
   case AST_GOTO:
+  case AST_BREAK:
+  case AST_CONTINUE:
     set_node_type(result, node, TYPE_VOID_ID);
     break;
   }

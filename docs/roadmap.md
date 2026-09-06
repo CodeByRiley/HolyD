@@ -35,8 +35,9 @@ Pointers, static arrays, dynamic arrays, slices, bounds checks, and pointer
 arithmetic. Explicit memory access remains load-bearing for a systems
 language, while slices should be preferred when a length is known.
 
-switch/case/default and labeled break/continue with D semantics. goto and
-labels are in.
+switch/case/default with D semantics. goto and labels are in, and so are
+unlabelled break and continue; the labelled forms wait on labelled
+statements.
 
 Logical, bitwise, shift, power, concatenation, assignment, and conditional
 operators sufficient for expression completeness.
@@ -165,9 +166,33 @@ it undefined.
 switch/case/default , represented by AST_SWITCH, AST_CASE, and AST_DEFAULT,
 with break semantics. Add BC_FLOW_SWITCH/BC_FLOW_TABLE_SWITCH or lower to
 if-else chains in codegen.
-break/continue , represented by AST_BREAK and AST_CONTINUE with an optional
-label. The bytecode already has BC_FLOW_JUMP/BC_FLOW_JUMP_IF_FALSE; add
-loop-context tracking in the compiler.
+break/continue are done, unlabelled. AST_BREAK and AST_CONTINUE carry no
+payload, and each backend tracks its own loop context: the VM records the
+jumps and patches them when the target is emitted, the C emitter writes C's
+break, and the assembler jumps to the loop's labels.
+
+Continue is the half worth stating. All three lowerings put something after
+the body , a for's increment, a foreach's counter bump , so a continue that
+went straight to the test would leave the loop variable alone and spin. It
+lands in front of that instead. In C that means a label and a goto rather
+than C's continue, because the C a for lowers to is a while with the
+increment at the end of its body; the label is only emitted when a continue
+in that body actually needs it, since an unreferenced label is a warning
+under the -Wall the generated C is compiled with.
+
+Which loop a break belongs to is settled once, in src/resolve.c, rather than
+three times: walk_loops rejects one outside a loop, so the VM, both backends
+and --interpret refuse the same programs. A for's initialiser and increment
+are expression positions in the parser, so neither statement can be written
+there; if they ever become statement positions, which loop they bind to has
+to be decided in walk_loops first, because the three backends put them in
+three different places relative to the loop they lower to.
+
+The tree walker refuses both, as it refuses goto and for the same reason: it
+runs the AST by recursion and has no way to unwind out of it.
+
+tests/break_continue.hd covers all three loop forms, nesting, a loop inside
+a function, an unbounded while, and a trailing continue, on both backends.
 do...while , represented by AST_DO_WHILE.
 goto and labels are done. A label is declared `.name:` and jumped to with
 `goto name;`; AST_LABEL and AST_GOTO carry the name, and src/resolve.c owns

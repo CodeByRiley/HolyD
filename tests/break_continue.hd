@@ -1,0 +1,104 @@
+// break and continue in each of the three loop forms. Every case is printed
+// rather than asserted, so difftest compares the VM against both backends on
+// the actual control flow and not on a boolean summary of it.
+
+Print("-- while --\n");
+I64 i = 0;
+while (i < 10) {
+    i += 1;
+    if (i % 2 == 0) continue;
+    if (i > 7) break;
+    Print(i);
+    Print(" ");
+}
+Print("\nafter while i=");
+Print(i);
+Print("\n");
+
+// The interesting case for continue: the increment lives after the body in
+// every lowering, so a continue that skipped it would never terminate.
+Print("-- for --\n");
+for (I64 j = 0; j < 10; j += 1) {
+    if (j == 3) continue;
+    if (j == 6) break;
+    Print(j);
+    Print(" ");
+}
+Print("\n");
+
+// Same for foreach, where the thing after the body is the loop counter.
+Print("-- foreach --\n");
+auto nums = [10, 20, 30, 40, 50];
+I64 total = 0;
+foreach (n; nums) {
+    if (n == 20) continue;
+    if (n == 50) break;
+    total += n;
+    Print(n);
+    Print(" ");
+}
+Print("\ntotal=");
+Print(total);
+Print("\n");
+
+// Indexed foreach, to check the index binding survives a continue.
+Print("-- foreach indexed --\n");
+foreach (idx, n; nums) {
+    if (idx == 1) continue;
+    if (n == 40) break;
+    Print(idx);
+    Print(":");
+    Print(n);
+    Print(" ");
+}
+Print("\n");
+
+// Nesting: each statement binds to its own innermost loop, so the inner
+// break must not escape the outer loop.
+Print("-- nested --\n");
+for (I64 a = 0; a < 4; a += 1) {
+    if (a == 2) continue;
+    for (I64 b = 0; b < 4; b += 1) {
+        if (b == 2) break;
+        Print(a);
+        Print(b);
+        Print(" ");
+    }
+}
+Print("\n");
+
+// A loop inside a function, so the backends exercise a non-global frame.
+I64 FirstOver(I64[] values, I64 limit) {
+    foreach (v; values) {
+        if (v <= limit) continue;
+        return v;
+    }
+    return -1;
+}
+
+Print("-- in a function --\n");
+Print(FirstOver(nums, 25));
+Print(" ");
+Print(FirstOver(nums, 99));
+Print("\n");
+
+// break out of a loop that never fails its test, which is the only way this
+// one terminates.
+Print("-- unbounded --\n");
+I64 k = 0;
+while (1) {
+    k += 1;
+    if (k == 5) break;
+}
+Print(k);
+Print("\n");
+
+// continue as the last statement of a body, so the jump target is the very
+// next thing emitted.
+Print("-- trailing continue --\n");
+foreach (n; nums) {
+    if (n < 40) continue;
+    Print(n);
+    Print(" ");
+}
+Print("\n");

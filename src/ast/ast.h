@@ -27,6 +27,8 @@ typedef enum {
     AST_FOREACH,        // foreach (x; arr) { block }
     AST_GOTO,						// GOTO label
     AST_LABEL,					// .label: (. defines start of label : defines the end)
+    AST_BREAK,          // break;
+    AST_CONTINUE,       // continue;
     AST_FUNC_DECL,
     AST_RETURN,				  // return expr
 } ASTNodeType;
@@ -228,6 +230,12 @@ ASTNode* ASTNewFuncDecl(TypeSyntax* return_type, const char* name, int len,
                         ParameterSyntax* parameters, int parameter_count,
                         ASTNode* body);
 ASTNode* ASTNewReturn(ASTNode* expr);
+
+/* break and continue carry no payload. D's labelled forms name the loop
+ * they leave, but AST_LABEL does not wrap a statement yet, so there is
+ * nothing for a label to refer to and no field is reserved for one. */
+ASTNode* ASTNewBreak(void);
+ASTNode* ASTNewContinue(void);
 
 /* Recursively print a parsed tree for front-end diagnostics. */
 void ASTPrint(const ASTNode* node, int indent);
