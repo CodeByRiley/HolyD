@@ -311,9 +311,22 @@ So is a code generator. `--emit-asm` writes x86-64 in GNU assembler syntax
 for the Win64 ABI, links the same runtime, and is held to the VM by
 `make difftest-asm` exactly as the C backend is. It is the deliberate step
 before emitting machine code: instruction selection, frame layout and the
-struct-passing rules are all in it and all checked, so an `--emit-exe`
+struct-passing rules are all in it and all checked, so a direct `--emit-exe`
 after it is an instruction encoder and a PE or ELF writer bolted to a code
 generator that already works, rather than all three at once.
+
+The first `--emit-exe` delivery is intentionally a compiler driver: it emits
+the tested Win64 assembly to a private temporary file and invokes a
+GCC-compatible host assembler/linker, producing an executable in one Holyd
+command. A direct PE writer remains the next native-code milestone; it must
+replace the host toolchain, not merely hide it behind a different flag.
+
+That direct work now starts as `--emit-pe`: it writes a PE32+ image itself,
+emits the x64 process entry bytes, and resolves `KERNEL32!ExitProcess` through
+its own import table. The deliberately narrow initial language is a
+parameterless entry function returning a constant integer expression. The
+next increments are native arithmetic/locals, control flow, and then the
+runtime services currently supplied by C.
 
 Two facts made it small. HDValue is 56 bytes, and both Win64 and SysV pass
 anything over 16 bytes in memory and return it through a hidden pointer, so

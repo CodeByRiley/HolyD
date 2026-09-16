@@ -65,6 +65,8 @@ holyd --interpret ...      walk the AST instead of running bytecode
 holyd --emit-c <source.hd> translate to C instead of running it
 holyd --emit-asm <source.hd>  translate to x86-64 assembly instead
 holyd --emit-c ... -o out.c   where to write it
+holyd --emit-pe <source.hd>   write a direct standalone PE executable
+holyd -run <source.hd>        build and run the direct PE subset
 holyd --help
 ```
 
@@ -101,6 +103,40 @@ gcc -std=gnu11 -O2 -I src gui.c \
     src/platform/standalone/gfx.c src/platform/standalone/bmp.c \
     -o gui.exe -lgdi32 -luser32 -lws2_32
 ```
+
+For the usual one-command path, use the assembly backend and let Holyd invoke
+the host assembler/linker itself:
+
+```
+holyd --emit-exe tests/hello.hd -o hello.exe
+```
+
+`--emit-exe` creates only the executable; its intermediate assembly is removed
+after the toolchain returns. It defaults to replacing `.hd` with `.exe`, and
+`HOLYD_CC` can name a different GCC-compatible host toolchain. It currently
+targets the standalone Windows build, links the same runtime as `make compile`,
+and is not yet a hand-written PE writer.
+
+### Direct PE output: first standalone milestone
+
+`--emit-pe` is the separate no-toolchain path. It writes a PE/x64 image itself
+and imports only `KERNEL32!ExitProcess`; it does not generate C or assembly,
+invoke an assembler/linker, or link the C runtime.
+
+```
+holyd --emit-pe samples/direct_pe_exit.hd -o direct-pe.exe
+```
+
+This first vertical slice intentionally accepts only a parameterless `main` or
+`Main` containing a single `return` of an integer constant expression. It is a
+real executable—the sample exits with status 42—but not a replacement for the
+VM or host-linker backend yet. Variables, calls, I/O, arrays, strings, and FFI
+will arrive with the native runtime milestones.
+
+`-run` is the convenience form for this same direct backend. It creates a
+private executable next to the source, runs it, removes it afterwards, and
+returns the child program's exit status. It does not accept `-o` because it
+never leaves an output artifact behind.
 
 Control flow becomes real C control flow, calls become direct C calls, and
 each name becomes a C local or a file-scope static. The semantic type pass

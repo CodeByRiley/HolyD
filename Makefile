@@ -38,6 +38,7 @@ SRCS := \
 	src/compiler.c \
 	src/emit_c.c \
 	src/emit_asm.c \
+	src/emit_pe.c \
 	src/lexer/lexer.c \
 	src/parser/parser.c \
 	src/ast/ast.c \

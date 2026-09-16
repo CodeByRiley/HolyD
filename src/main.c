@@ -5,6 +5,7 @@
 
 #include "compiler.h"
 #include "emit_c.h"
+#include "emit_pe.h"
 #include "eval.h"
 #include "ffi.h"
 #include "parser/parser.h"
@@ -12,8 +13,13 @@
 #include "resolve.h"
 #include "typecheck.h"
 #include <stdio.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+
+#ifdef _WIN32
+#include <process.h>
+#endif
 
 /* Listing a directory is the one thing this file needs that is not standard
  * C. TOS answers it with a syscall that packs several names per call;
@@ -356,7 +362,7 @@ static void print_usage(void) {
 // Why a documented flag still cannot run. NULL means we do not know the flag
 // at all, which is a different message.
 static const char *unimplemented_reason(const char *arg) {
-  static const char *needs_backend[] = {"-run", "-S", "-obj", "-lib",
+  static const char *needs_backend[] = {"-S", "-obj", "-lib",
                                         "-clibs"};
   for (unsigned i = 0; i < sizeof(needs_backend) / sizeof(needs_backend[0]); i++) {
     if (strcmp(arg, needs_backend[i]) == 0) {
@@ -374,6 +380,109 @@ static const char *unimplemented_reason(const char *arg) {
     return "control flow graphs are not built yet, and these also need graphviz";
   }
   return NULL;
+}
+
+/* The native emitter already handles instruction selection and the Win64
+ * calling convention. This final host-toolchain step stays here because
+ * assembling and linking are host concerns, not AST emission. _spawnvp uses
+ * an argv array, so paths containing spaces cannot become compiler options. */
+static int assemble_and_link(const char *assembly_path, const char *output_path) {
+#ifdef _WIN32
+  const char *compiler = getenv("HOLYD_CC");
+  if (compiler == NULL || compiler[0] == '\0')
+    compiler = "cc";
+
+  const char *arguments[] = {
+      compiler,
+      "-std=gnu11", "-O2", "-I", "src", assembly_path,
+      "src/runtime.c", "src/eval.c", "src/ffi.c", "src/ffi_win32.c",
+      "src/platform/standalone/gfx.c", "src/platform/standalone/bmp.c",
+      "-o", output_path, "-lgdi32", "-luser32", "-lws2_32", NULL};
+  intptr_t status = _spawnvp(_P_WAIT, compiler, arguments);
+  if (status == -1) {
+    printf("holyd: could not start '%s' (set HOLYD_CC to choose a C toolchain).\n",
+           compiler);
+    return 0;
+  }
+  if (status != 0) {
+    printf("holyd: assembler/linker failed while creating '%s'.\n", output_path);
+    return 0;
+  }
+  return 1;
+#else
+  (void)assembly_path;
+  (void)output_path;
+  printf("holyd: --emit-exe is currently implemented for the Windows host build.\n");
+  return 0;
+#endif
+}
+
+/* The compiler refuses to reuse an existing temporary, so cleanup can only
+ * remove a file created by this invocation. */
+static char *temporary_assembly_name(const char *output_path) {
+  size_t length = strlen(output_path);
+  const char suffix[] = ".holyd.tmp.s";
+  char *path = malloc(length + sizeof(suffix));
+  if (!path)
+    return NULL;
+  memcpy(path, output_path, length);
+  memcpy(path + length, suffix, sizeof(suffix));
+  return path;
+}
+
+/* -run owns this output and deletes it after the child exits. Refusing an
+ * existing path keeps cleanup confined to an artifact this invocation made. */
+static char *temporary_run_name(const char *source_path) {
+  size_t length = strlen(source_path);
+  const char suffix[] = ".holyd-run.exe";
+  char *path = malloc(length + sizeof(suffix));
+  if (!path)
+    return NULL;
+  memcpy(path, source_path, length);
+  memcpy(path + length, suffix, sizeof(suffix));
+  return path;
+}
+
+static int emit_and_run_pe(ASTNode *program, const char *source_path,
+                           const char *executable_path, int *exit_code) {
+#ifdef _WIN32
+  FILE *existing = fopen(executable_path, "rb");
+  if (existing != NULL) {
+    fclose(existing);
+    printf("Error: run executable path '%s' already exists; refusing to replace it.\n",
+           executable_path);
+    return 0;
+  }
+
+  FILE *out = fopen(executable_path, "wb");
+  if (out == NULL) {
+    printf("Error: could not open '%s' for writing\n", executable_path);
+    return 0;
+  }
+  int emitted = HDEmitPE(program, out, source_path);
+  fclose(out);
+  if (!emitted) {
+    remove(executable_path);
+    return 0;
+  }
+
+  const char *arguments[] = {executable_path, NULL};
+  intptr_t status = _spawnv(_P_WAIT, executable_path, arguments);
+  remove(executable_path);
+  if (status == -1) {
+    printf("holyd: could not start direct executable '%s'.\n", executable_path);
+    return 0;
+  }
+  *exit_code = (int)status;
+  return 1;
+#else
+  (void)program;
+  (void)source_path;
+  (void)executable_path;
+  (void)exit_code;
+  printf("holyd: -run is currently implemented for the Windows direct-PE backend.\n");
+  return 0;
+#endif
 }
 
 // Runs the lexer alone, so this still works on a file the parser rejects.
@@ -411,6 +520,9 @@ int main(int argc, char **argv) {
   int run_tests = 0;
   int emit_c = 0;
   int emit_asm = 0;
+  int emit_exe = 0;
+  int emit_pe = 0;
+  int run_direct = 0;
   const char *output_path = NULL;
   const char *source_path = NULL;
 
@@ -432,6 +544,10 @@ int main(int argc, char **argv) {
     }
     if (strcmp(arg, "--interpret") == 0) {
       use_interpreter = 1;
+      continue;
+    }
+    if (strcmp(arg, "-run") == 0) {
+      run_direct = 1;
       continue;
     }
     if (strcmp(arg, "--dump-bytecode") == 0) {
@@ -460,6 +576,14 @@ int main(int argc, char **argv) {
     }
     if (strcmp(arg, "--emit-c") == 0) {
       emit_c = 1;
+      continue;
+    }
+    if (strcmp(arg, "--emit-exe") == 0) {
+      emit_exe = 1;
+      continue;
+    }
+    if (strcmp(arg, "--emit-pe") == 0) {
+      emit_pe = 1;
       continue;
     }
     if (strcmp(arg, "-o") == 0) {
@@ -568,15 +692,33 @@ int main(int argc, char **argv) {
     return 0;
   }
 
-  if (emit_c || emit_asm) {
-    /* Default output name is the source with its extension swapped, so
-     * `holyd --emit-c samples/gui.hd` lands at samples/gui.c, and
-     * `--emit-asm` on the same file lands at samples/gui.s. */
+  if (run_direct) {
+    char *temporary_path = temporary_run_name(source_path);
+    if (temporary_path == NULL) {
+      printf("Error: out of memory choosing a temporary executable name.\n");
+      HDTypeCheckFree(&types);
+      HDResolutionFree(&resolution);
+      free(source);
+      return 1;
+    }
+    int program_exit = 0;
+    int ok = emit_and_run_pe(program, source_path, temporary_path,
+                             &program_exit);
+    free(temporary_path);
+    HDTypeCheckFree(&types);
+    HDResolutionFree(&resolution);
+    free(source);
+    if (!ok)
+      return 1;
+    return program_exit;
+  }
+
+  if (emit_pe) {
     char *derived = NULL;
     const char *target = output_path;
     if (target == NULL) {
       size_t len = strlen(source_path);
-      derived = malloc(len + 3); /* ".hd" -> ".c" never grows, but be safe */
+      derived = malloc(len + 3); /* ".hd" -> ".exe" plus NUL */
       if (derived == NULL) {
         printf("Error: out of memory choosing an output name.\n");
         HDTypeCheckFree(&types);
@@ -585,9 +727,104 @@ int main(int argc, char **argv) {
         return 1;
       }
       memcpy(derived, source_path, len - 2);
-      derived[len - 2] = emit_asm ? 's' : 'c';
-      derived[len - 1] = '\0';
+      memcpy(derived + len - 2, "exe", 4);
       target = derived;
+    }
+
+    FILE *out = fopen(target, "wb");
+    if (out == NULL) {
+      printf("Error: could not open '%s' for writing\n", target);
+      free(derived);
+      HDTypeCheckFree(&types);
+      HDResolutionFree(&resolution);
+      free(source);
+      return 1;
+    }
+    int ok = HDEmitPE(program, out, source_path);
+    fclose(out);
+    if (ok)
+      printf("holyd: wrote %s\n", target);
+    free(derived);
+    HDTypeCheckFree(&types);
+    HDResolutionFree(&resolution);
+    free(source);
+    return ok ? 0 : 1;
+  }
+
+  if (emit_c || emit_asm || emit_exe) {
+    /* Default output name is the source with its extension swapped, so
+     * `holyd --emit-c samples/gui.hd` lands at samples/gui.c, and
+     * `--emit-asm` on the same file lands at samples/gui.s, and
+     * `--emit-exe` lands at samples/gui.exe. */
+    char *derived = NULL;
+    const char *target = output_path;
+    if (target == NULL) {
+      size_t len = strlen(source_path);
+      derived = malloc(len + 3); /* enough for ".hd" -> ".exe" plus NUL */
+      if (derived == NULL) {
+        printf("Error: out of memory choosing an output name.\n");
+        HDTypeCheckFree(&types);
+        HDResolutionFree(&resolution);
+        free(source);
+        return 1;
+      }
+      memcpy(derived, source_path, len - 2);
+      if (emit_exe) {
+        memcpy(derived + len - 2, "exe", 4);
+      } else {
+        derived[len - 2] = emit_asm ? 's' : 'c';
+        derived[len - 1] = '\0';
+      }
+      target = derived;
+    }
+
+    if (emit_exe) {
+      char *assembly_path = temporary_assembly_name(target);
+      if (assembly_path == NULL) {
+        printf("Error: out of memory choosing a temporary assembly name.\n");
+        free(derived);
+        HDTypeCheckFree(&types);
+        HDResolutionFree(&resolution);
+        free(source);
+        return 1;
+      }
+
+      FILE *existing = fopen(assembly_path, "rb");
+      if (existing != NULL) {
+        fclose(existing);
+        printf("Error: temporary assembly path '%s' already exists; refusing to replace it.\n",
+               assembly_path);
+        free(assembly_path);
+        free(derived);
+        HDTypeCheckFree(&types);
+        HDResolutionFree(&resolution);
+        free(source);
+        return 1;
+      }
+
+      FILE *assembly = fopen(assembly_path, "wb");
+      if (assembly == NULL) {
+        printf("Error: could not open '%s' for writing\n", assembly_path);
+        free(assembly_path);
+        free(derived);
+        HDTypeCheckFree(&types);
+        HDResolutionFree(&resolution);
+        free(source);
+        return 1;
+      }
+
+      int emitted = HDEmitAsm(program, &resolution, assembly, source_path);
+      fclose(assembly);
+      int linked = emitted && assemble_and_link(assembly_path, target);
+      remove(assembly_path);
+      free(assembly_path);
+      if (linked)
+        printf("holyd: wrote %s\n", target);
+      free(derived);
+      HDTypeCheckFree(&types);
+      HDResolutionFree(&resolution);
+      free(source);
+      return linked ? 0 : 1;
     }
 
     FILE *out = fopen(target, "wb");

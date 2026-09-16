@@ -1,0 +1,9 @@
+/* The first no-toolchain backend milestone. Build with:
+ *
+ *   holyd --emit-pe samples/direct_pe_exit.hd -o direct-pe.exe
+ *
+ * The process exits with status 42. This small program exercises the PE
+ * headers, KERNEL32 import table, x64 instruction bytes, and entry point. */
+I64 main() {
+    return 6 * 7;
+}
