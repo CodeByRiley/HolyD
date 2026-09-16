@@ -172,6 +172,11 @@ static char peek_next(Lexer* lexer) {
     return lexer->current[1];
 }
 
+static char peek_next_next(Lexer* lexer) {
+    if (*lexer->current == '\0' || lexer->current[1] == '\0') return '\0';
+    return lexer->current[2];
+}
+
 static int match(Lexer* lexer, char expected) {
     if (*lexer->current == expected) {
         advance(lexer);
@@ -233,6 +238,8 @@ static Token quoted(Lexer* lexer, char quote, TokenType type) {
 }
 
 static Token number(Lexer* lexer) {
+    int is_float = 0;
+
     if (lexer->start[0] == '0' && (peek(lexer) == 'x' || peek(lexer) == 'X')) {
         advance(lexer);
         while (is_hex_digit(peek(lexer))) {
@@ -253,10 +260,28 @@ static Token number(Lexer* lexer) {
         while (is_digit(peek(lexer))) {
             advance(lexer);
         }
-        return make_token(lexer, TOKEN_FLOAT);
+        is_float = 1;
     }
 
-    return make_token(lexer, TOKEN_NUMBER);
+    /* An exponent is part of a decimal float only if it has at least one
+     * digit. Keeping malformed tails separate preserves useful diagnostics:
+     * `1e` remains the number `1` followed by the identifier `e`, rather
+     * than silently accepting an invalid floating literal. */
+    if ((peek(lexer) == 'e' || peek(lexer) == 'E') &&
+        (is_digit(peek_next(lexer)) ||
+         ((peek_next(lexer) == '+' || peek_next(lexer) == '-') &&
+          is_digit(peek_next_next(lexer))))) {
+        advance(lexer);
+        if (peek(lexer) == '+' || peek(lexer) == '-') {
+            advance(lexer);
+        }
+        while (is_digit(peek(lexer))) {
+            advance(lexer);
+        }
+        is_float = 1;
+    }
+
+    return make_token(lexer, is_float ? TOKEN_FLOAT : TOKEN_NUMBER);
 }
 
 static Token identifier(Lexer* lexer) {

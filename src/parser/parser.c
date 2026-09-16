@@ -451,27 +451,55 @@ static ASTNode* ParseNumber(Parser* parser) {
 }
 
 static ASTNode* ParseFloat(Parser* parser) {
-    /* No strtod in freestanding. The lexer already guaranteed the shape
-     * `digits . digits`, so a two-pass scan over the token is enough. */
+    /* No strtod in freestanding. The lexer has already validated a decimal
+     * mantissa with an optional exponent, so decode it without depending on
+     * the host C library. */
     const char* text = parser->previous.start;
     int length = parser->previous.length;
 
     double val = 0.0;
     int i = 0;
-    for (; i < length && text[i] != '.'; i++) {
+    for (; i < length && text[i] >= '0' && text[i] <= '9'; i++) {
         val = val * 10.0 + (double)(text[i] - '0');
     }
 
-    /* Accumulate the fraction as an integer and divide once. Scaling by 0.1
-     * per digit instead would fold a rounding error in at every step, so
-     * even 3.75 could miss the exactly-representable value. */
-    long long frac = 0;
-    double divisor = 1.0;
-    for (i++; i < length && divisor < 1.0e18; i++) {
-        frac = frac * 10 + (text[i] - '0');
-        divisor *= 10.0;
+    if (i < length && text[i] == '.') {
+        /* Accumulate the fraction as an integer and divide once. Scaling by
+         * 0.1 per digit would fold a rounding error in at every step. */
+        long long frac = 0;
+        double divisor = 1.0;
+        i++;
+        for (; i < length && text[i] >= '0' && text[i] <= '9'; i++) {
+            if (divisor < 1.0e18) {
+                frac = frac * 10 + (text[i] - '0');
+                divisor *= 10.0;
+            }
+        }
+        val += (double)frac / divisor;
     }
-    val += (double)frac / divisor;
+
+    if (i < length && (text[i] == 'e' || text[i] == 'E')) {
+        int exponent = 0;
+        int exponent_sign = 1;
+        i++;
+        if (text[i] == '+' || text[i] == '-') {
+            exponent_sign = text[i] == '-' ? -1 : 1;
+            i++;
+        }
+        for (; i < length; i++) {
+            /* Clamp deliberately: a larger exponent has already overflowed
+             * or underflowed an F64, and this keeps pathological source from
+             * turning parsing into an enormous loop. */
+            if (exponent <= 999) {
+                exponent = exponent * 10 + (text[i] - '0');
+            } else {
+                exponent = 10000;
+            }
+        }
+        while (exponent-- > 0 && val != 0.0) {
+            val = exponent_sign < 0 ? val / 10.0 : val * 10.0;
+        }
+    }
 
     return span_token(ASTNewFloat(val), parser->previous);
 }
