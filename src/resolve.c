@@ -217,6 +217,10 @@ static void visit_children(ASTNode *node,
   case AST_UNARY_OP:
     visit(resolver, node->as.unary_op.operand);
     break;
+  case AST_CAST:
+    visit_type(node->as.cast.target_type, visit, resolver);
+    visit(resolver, node->as.cast.expression);
+    break;
   case AST_TERNARY_OP:
     visit(resolver, node->as.ternary_op.condition);
     visit(resolver, node->as.ternary_op.true_expr);
@@ -236,6 +240,18 @@ static void visit_children(ASTNode *node,
     break;
   case AST_ARRAY_LEN_EXPR:
     visit(resolver, node->as.array_length_expr.target);
+    break;
+  case AST_MEMBER_ACCESS:
+    visit(resolver, node->as.member_access.target);
+    break;
+  case AST_MEMBER_ASSIGN:
+    visit(resolver, node->as.member_assignment.target);
+    visit(resolver, node->as.member_assignment.value);
+    break;
+  case AST_MEMBER_CALL:
+    visit(resolver, node->as.member_call.target);
+    for (int i = 0; i < node->as.member_call.argument_count; i++)
+      visit(resolver, node->as.member_call.arguments[i]);
     break;
   case AST_VAR_DECL:
     visit_type(node->as.variable_decl.declared_type, visit, resolver);
@@ -279,6 +295,12 @@ static void visit_children(ASTNode *node,
     break;
   case AST_FUNC_DECL:
     /* Function bodies own a different name scope and are visited separately. */
+    break;
+  case AST_CLASS_DECL:
+    /* Classes have their own member/receiver scope.  The C backend lowers
+     * that scope itself; treating fields as top-level declarations here
+     * would give a class field a global slot, which is neither useful nor
+     * correct. */
     break;
   case AST_LABEL:
   case AST_GOTO:

@@ -1,0 +1,115 @@
+/* First executable class fixture.  Build with
+ * `make compile HD=samples/class_syntax.hd`; classes currently lower through
+ * the C backend. */
+
+
+F64 sqrt(I64 x) {
+	if (x < 0) {
+        return -1.0;
+    }
+
+    if (x == 0) {
+        return 0.0;
+    }
+
+    F64 target = cast(F64)x;
+    F64 guess = target;
+
+    for (I64 i = 0; i < 100; ++i) {
+        F64 next = 0.5 * (guess + target / guess);
+
+        F64 difference = next - guess;
+        if (difference < 0.0) {
+            difference = -difference;
+        }
+
+        if (difference <= 0.000000000001) {
+            return next;
+        }
+
+        guess = next;
+    }
+
+    return guess;
+}
+
+class Point {
+    I64 x;
+    I64 y;
+
+    this(I64 X, I64 Y) {
+        this.x = X;
+        this.y = Y;
+    }
+
+    this(I64 initialX) {
+        this.x = initialX;
+    }
+
+    I64 magnitudeSquared() {
+        return 0;
+    }
+}
+
+class Line {
+	Point start;
+	Point end;
+
+	Line(I64 startX, I64 startY, I64 endX, I64 endY) {
+		this.start = Point(startX, startY);
+		this.end = Point(endX, endY);
+	}
+
+	Line(Point start, Point end) {
+		I64 dx = start.x - end.x;
+		I64 dy = start.y - end.y;
+		return sqrt(dx * dx + dy * dy);
+	}
+
+	I64 length() {
+		return this.start.x - this.end.x;
+	}
+}
+
+class Circle {
+	I64 r;
+	Point center;
+
+	Circle(I64 radius, Point center) {
+		this.r = radius;
+		this.center = center;
+	}
+
+	I64 diameter() {
+		return 2 * this.r;
+	}
+
+	F64 area() {
+		return 3.1415926 * (this.r * this.r);
+	}
+
+	F64 circumference() {
+		return 2 * 3.1415926 * this.r;
+	}
+}
+
+class ColoredPoint : Point {
+    I64 colour;
+}
+
+U0 main() {
+	Point p = Point(0, 0);
+	Circle c = Circle(43, p);
+	Line l = Line(4, 4, 5, 5);
+	PrintLn(l.length())
+	PrintLn("Circle:")
+	PrintLn(" area ", c.area())
+	PrintLn(" diameter ", c.diameter())
+	PrintLn(" circumference ", c.circumference())
+	PrintLn("Changing circle radius to 66");
+	c.r = 66;
+	PrintLn("Circle:")
+	PrintLn(" area ", c.area())
+	PrintLn(" diameter ", c.diameter())
+	PrintLn(" circumference ", c.circumference())
+}

@@ -37,6 +37,34 @@ HDValue float_value(double v) {
   return value;
 }
 
+int HDCastKindFromTypeSyntax(const TypeSyntax *type, HDCastKind *kind) {
+  static const struct {
+    const char *name;
+    HDCastKind kind;
+  } names[] = {
+      {"F64", HD_CAST_FLOAT}, {"double", HD_CAST_FLOAT},
+      {"Bool", HD_CAST_BOOL}, {"bool", HD_CAST_BOOL},
+      {"I8", HD_CAST_INT}, {"U8", HD_CAST_INT},
+      {"I16", HD_CAST_INT}, {"U16", HD_CAST_INT},
+      {"I32", HD_CAST_INT}, {"U32", HD_CAST_INT},
+      {"I64", HD_CAST_INT}, {"U64", HD_CAST_INT},
+      {"int", HD_CAST_INT}, {"uint", HD_CAST_INT},
+      {"long", HD_CAST_INT}, {"ulong", HD_CAST_INT},
+  };
+  if (!type || !kind || type->kind != TYPE_SYNTAX_NAMED)
+    return 0;
+  const char *name = type->as.named.name;
+  int length = type->as.named.name_length;
+  for (int i = 0; i < (int)(sizeof(names) / sizeof(names[0])); i++) {
+    int expected = (int)strlen(names[i].name);
+    if (length == expected && strncmp(name, names[i].name, (size_t)length) == 0) {
+      *kind = names[i].kind;
+      return 1;
+    }
+  }
+  return 0;
+}
+
 /* ---------------- Inspection --------------------------------------------- */
 
 int HDIsNumeric(HDValue value) {
@@ -474,6 +502,30 @@ int HDLength(HDValue value, HDValue *out) {
   return 0;
 }
 
+int HDCast(HDCastKind kind, HDValue value, HDValue *out) {
+  switch (kind) {
+  case HD_CAST_INT:
+    if (!HDIsNumeric(value)) {
+      printf("Runtime error: cast to integer expects a numeric value.\n");
+      return 0;
+    }
+    *out = int_value((long long)HDAsDouble(value));
+    return 1;
+  case HD_CAST_FLOAT:
+    if (!HDIsNumeric(value)) {
+      printf("Runtime error: cast to F64 expects a numeric value.\n");
+      return 0;
+    }
+    *out = float_value(HDAsDouble(value));
+    return 1;
+  case HD_CAST_BOOL:
+    *out = int_value(HDTruthy(value));
+    return 1;
+  }
+  printf("Runtime error: unknown cast target.\n");
+  return 0;
+}
+
 /* ---------------- Aborting forms, for generated code ---------------------- */
 
 HDValue HDBinaryX(HDBinOp op, HDValue left, HDValue right) {
@@ -505,6 +557,13 @@ void HDIndexSetX(HDValue array, HDValue index, HDValue value) {
 HDValue HDLengthX(HDValue value) {
   HDValue out;
   if (!HDLength(value, &out))
+    exit(1);
+  return out;
+}
+
+HDValue HDCastX(HDCastKind kind, HDValue value) {
+  HDValue out;
+  if (!HDCast(kind, value, &out))
     exit(1);
   return out;
 }

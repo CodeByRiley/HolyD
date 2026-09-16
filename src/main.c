@@ -126,6 +126,20 @@ int check_ext(const char *filename) {
   return ext && strcmp(ext, ".hd") == 0;
 }
 
+/* Class declarations are presently lowered by the C backend.  Keep the
+ * bytecode, interpreter, assembly and tiny direct-PE backends from treating
+ * a class as an invisible no-op while those backends gain object support. */
+static int program_has_classes(const ASTNode *program) {
+  if (!program || program->type != AST_BLOCK)
+    return 0;
+  for (int i = 0; i < program->as.block.statement_count; i++) {
+    const ASTNode *statement = program->as.block.statements[i];
+    if (statement && statement->type == AST_CLASS_DECL)
+      return 1;
+  }
+  return 0;
+}
+
 char *read_file(const char *filename) {
   FILE *file =
       fopen(filename, "rb");
@@ -350,8 +364,14 @@ static void print_usage(void) {
   printf("  %-16s %s\n", "--interpret", "Walk the AST instead of running bytecode");
   printf("  %-16s %s\n", "--dump-bytecode", "Disassemble the program before running it");
   printf("  %-16s %s\n", "--emit-c [-o]", "Write runnable C source and exit");
+  printf("  %-16s %s\n", "--emit-exe [-o]",
+         "Build a runnable Windows executable through the assembly backend");
+  printf("  %-16s %s\n", "--emit-pe [-o]",
+         "Write a direct PE executable (no assembler, linker, or C runtime)");
+  printf("  %-16s %s\n", "-run",
+         "Build and run a direct PE executable without a host toolchain");
   printf("\nNot implemented yet:\n");
-  printf("  %-16s %s\n", "-run -S -obj", "need a native code backend");
+  printf("  %-16s %s\n", "-S -obj", "need a native code backend");
   printf("  %-16s %s\n", "-lib -clibs -o", "need a native code backend");
   printf("  %-16s %s\n", "-D<var>", "needs a preprocessor");
   printf("  %-16s %s\n", "-cfg", "control flow graphs are not built yet");
@@ -623,6 +643,15 @@ int main(int argc, char **argv) {
     return test(source_path != NULL ? source_path : HOLYD_DEFAULT_TEST_DIR);
   }
 
+  if (emit_c + emit_asm + emit_exe + emit_pe + run_direct > 1) {
+    printf("holyd: choose only one output mode.\n");
+    return 1;
+  }
+  if (run_direct && output_path != NULL) {
+    printf("holyd: -run owns a temporary executable and does not accept -o.\n");
+    return 1;
+  }
+
   if (source_path == NULL) {
     print_usage();
     return 1;
@@ -678,6 +707,14 @@ int main(int argc, char **argv) {
 
   HDTypeCheck types;
   if (!HDTypeCheckProgram(program, &resolution, &types)) {
+    HDTypeCheckFree(&types);
+    HDResolutionFree(&resolution);
+    free(source);
+    return 1;
+  }
+
+  if (program_has_classes(program) && !emit_c) {
+    printf("Error: classes currently execute through --emit-c only.\n");
     HDTypeCheckFree(&types);
     HDResolutionFree(&resolution);
     free(source);

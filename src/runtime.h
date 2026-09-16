@@ -46,6 +46,20 @@ typedef enum {
   HD_CONCAT
 } HDBinOp;
 
+/* The first cast slice deliberately follows the runtime's actual value
+ * model: integers, doubles, and truth values. Source-width integer names
+ * share the signed 64-bit storage used everywhere else today. */
+typedef enum {
+  HD_CAST_INT,
+  HD_CAST_FLOAT,
+  HD_CAST_BOOL
+} HDCastKind;
+
+/* Converts a parsed scalar type spelling into the compact runtime dispatch
+ * kind. Keeping this here avoids four backends independently deciding what
+ * `cast(long)` or `cast(F64)` means. */
+int HDCastKindFromTypeSyntax(const TypeSyntax *type, HDCastKind *kind);
+
 /* ---- Constructors. Declared in compiler.h too, for existing callers. ---- */
 HDValue int_value(long long v);
 HDValue string_value(const char *s, int len);
@@ -74,6 +88,7 @@ int HDArrayNew(int count, HDValue *elements, HDValue *out);
 int HDIndex(HDValue array, HDValue index, HDValue *out);
 int HDIndexSet(HDValue array, HDValue index, HDValue value);
 int HDLength(HDValue value, HDValue *out);
+int HDCast(HDCastKind kind, HDValue value, HDValue *out);
 
 /* ---- Aborting forms, for generated code ---- */
 HDValue HDBinaryX(HDBinOp op, HDValue left, HDValue right);
@@ -81,6 +96,7 @@ HDValue HDArrayNewX(int count, HDValue *elements);
 HDValue HDIndexX(HDValue array, HDValue index);
 void HDIndexSetX(HDValue array, HDValue index, HDValue value);
 HDValue HDLengthX(HDValue value);
+HDValue HDCastX(HDCastKind kind, HDValue value);
 /* Reads a variable, aborting with the VM's message when it is undefined. */
 HDValue HDLoadX(Environment *env, const char *name, int len);
 /* Calls a native by name, aborting when no native has that name. Generated

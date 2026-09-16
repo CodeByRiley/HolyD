@@ -1,0 +1,5 @@
+I64 i = 0;
+++i;
+PrintLn(i);
+--i;
+PrintLn(i);

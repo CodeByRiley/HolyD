@@ -49,6 +49,7 @@ typedef enum {
   BC_COMPARE_GE,              /* >= */
 
   BC_LOGIC_NOT,               /* ! */
+  BC_CAST,                    /* operand is HDCastKind */
 
   BC_BIT_AND,                 /* & */
   BC_BIT_OR,                  /* | */

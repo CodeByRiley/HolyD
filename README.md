@@ -311,6 +311,13 @@ much:
   that declares parameters is never called automatically.
 - No structs. That is why `WinPollEvent` returns a code and the rest of the
   event is read back through `WinEventKey()`, `WinEventX()` and friends.
+- Classes execute through the C backend: `make compile HD=samples/class_syntax.hd`
+  lowers them to heap-allocated C structs. Fields, `this.field`,
+  `object.field`, receiver methods, D-style `this(...)` constructors,
+  class-name constructors, and inherited fields/methods work. A derived class
+  with no constructor forwards a matching constructor call to its base as a
+  temporary convenience. Bytecode, assembly, direct-PE, and interpreter
+  backends still reject class programs rather than silently skipping them.
 
 `docs/roadmap.md` is the full list of what is missing, roughly in the order
 it is worth adding.

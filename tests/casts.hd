@@ -1,0 +1,6 @@
+I64 whole = cast(I64) 3.75;
+F64 half = cast(F64) whole / 2;
+PrintLn(whole);
+PrintLn(half);
+PrintLn(cast(Bool) 0);
+PrintLn(cast(Bool) "nonempty");

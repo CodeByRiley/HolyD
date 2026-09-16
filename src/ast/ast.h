@@ -6,31 +6,41 @@
 
 // All the different kinds of AST nodes
 typedef enum {
-    AST_NUMBER,         // 123
-    AST_FLOAT,          // 1.5
-    AST_STRING,         // "Hello"
-    AST_VAR_DECL,       // I64 x = expr;
-    AST_VAR_REF,        // x
-    AST_ASSIGN,         // x = expr;
-    AST_INDEX_ASSIGN,   // arr[index] = expr;
-    AST_BINARY_OP,      // expr + expr
-    AST_UNARY_OP,       // !expr, -expr
-    AST_TERNARY_OP,     // cond ? expr : expr
-    AST_CALL,           // Print(expr)
-    AST_ARRAY_LITERAL,  // [expr, expr]
-    AST_INDEX,          // array[index]
-    AST_ARRAY_LEN_EXPR, // array.length
-    AST_BLOCK,          // { statement1; statement2; }
-    AST_IF,             // if (cond) { block } else { block }
-    AST_WHILE,          // while (cond) { block }
-    AST_FOR,            // for (init; cond; inc) { block }
-    AST_FOREACH,        // foreach (x; arr) { block }
-    AST_GOTO,						// GOTO label
-    AST_LABEL,					// .label: (. defines start of label : defines the end)
-    AST_BREAK,          // break;
-    AST_CONTINUE,       // continue;
-    AST_FUNC_DECL,
-    AST_RETURN,				  // return expr
+    AST_NUMBER,         		// 123
+    AST_FLOAT,          		// 1.5
+    AST_STRING,         		// "Hello"
+    AST_VAR_DECL,       		// I64 x = expr;
+    AST_VAR_REF,        		// x
+    AST_ASSIGN,         		// x = expr;
+    AST_INDEX_ASSIGN,   		// arr[index] = expr;
+    AST_BINARY_OP,      		// expr + expr
+    AST_UNARY_OP,       		// !expr, -expr
+    AST_CAST,           		// cast(Type) expr
+    AST_TERNARY_OP,     		// cond ? expr : expr
+    AST_CALL,           		// Print(expr)
+    AST_ARRAY_LITERAL,  		// [expr, expr]
+    AST_INDEX,          		// array[index]
+    AST_ARRAY_LEN_EXPR, 		// array.length
+    AST_MEMBER_ACCESS,  		// object.member
+    AST_MEMBER_ASSIGN,  		// object.member = expr
+    AST_MEMBER_CALL,    		// object.method(args)
+    AST_BLOCK,          		// { statement1; statement2; }
+    AST_IF,             		// if (cond) { block } else { block }
+    AST_WHILE,          		// while (cond) { block }
+    AST_FOR,            		// for (init; cond; inc) { block }
+    AST_FOREACH,        		// foreach (x; arr) { block }
+    AST_GOTO,								// GOTO label
+    AST_LABEL,							// .label: (. defines start of label : defines the end)
+    AST_BREAK,          		// break;
+    AST_CONTINUE,       		// continue;
+    AST_FUNC_DECL,					// type Name(parameters) { body }
+    AST_THIS,             	// this
+    AST_CONSTRUCTOR_DECL, 	// this(parameters) { body } or Name(parameters) { body }
+    AST_STRUCT_DECL,      	// struct Name { members }
+    // AST_ENUM_DECL,       // enum Name { members }
+    // AST_ENUM_MEMBER,     // Name = value (value is optional)
+    AST_CLASS_DECL,     		// class Name [: Base] { members }
+    AST_RETURN,				  		// return expr
 } ASTNodeType;
 
 typedef struct {
@@ -83,6 +93,11 @@ typedef struct {
 } ASTUnaryOp;
 
 typedef struct {
+    TypeSyntax* target_type;
+    ASTNode* expression;
+} ASTCast;
+
+typedef struct {
   ASTNode* condition;
   ASTNode* true_expr;
   ASTNode* false_expr;
@@ -106,6 +121,25 @@ typedef struct {
 typedef struct {
     ASTNode* target;
 } ASTArrayLengthExpr;
+
+typedef struct {
+    ASTNode* target;
+    const char* name;
+    int name_length;
+} ASTMemberAccess;
+
+typedef struct {
+    ASTNode* target;
+    ASTNode* value;
+} ASTMemberAssignment;
+
+typedef struct {
+    ASTNode* target;
+    const char* name;
+    int name_length;
+    ASTNode** arguments;
+    int argument_count;
+} ASTMemberCall;
 
 typedef struct {
     const char* callee_name;
@@ -162,6 +196,24 @@ typedef struct {
     ASTNode* body;
 } ASTFunctionDecl;
 
+/* Constructors are distinct from ordinary functions: D spells them
+ * `this(...)`, not as a function named after the class. */
+typedef struct {
+    ParameterSyntax* parameters;
+    int parameter_count;
+    ASTNode* body;
+} ASTConstructorDecl;
+
+/* Members preserve declaration order: fields, methods, and constructors all
+ * stay as AST nodes so layout and duplicate-name checks have one source. */
+typedef struct {
+    const char* name;
+    int name_length;
+    TypeSyntax* base_type;
+    ASTNode** members;
+    int member_count;
+} ASTClassDecl;
+
 typedef struct {
     ASTNode* expression;
 } ASTReturnStatement;
@@ -179,9 +231,13 @@ struct ASTNode {
         ASTIndexAssignment index_assignment;
         ASTBinaryOp binary_op;
         ASTUnaryOp unary_op;
+        ASTCast cast;
         ASTTernaryOp ternary_op;
         ASTIndexExpr index_expr;
         ASTArrayLengthExpr array_length_expr;
+        ASTMemberAccess member_access;
+        ASTMemberAssignment member_assignment;
+        ASTMemberCall member_call;
         ASTCall call;
         ASTArrayLiteral array_literal;
         ASTBlock block;
@@ -190,6 +246,8 @@ struct ASTNode {
         ASTForStatement for_statement;
         ASTForeachStatement foreach_statement;
         ASTFunctionDecl function_decl;
+        ASTConstructorDecl constructor_decl;
+        ASTClassDecl class_decl;
         ASTReturnStatement return_statement;
         ASTLabel label;
         ASTGoto goto_statement;
@@ -204,11 +262,13 @@ ASTNode* ASTNewNumber(long long val);
 ASTNode* ASTNewBoolean(int value);
 ASTNode* ASTNewFloat(double val);
 ASTNode* ASTNewString(const char* str, int len);
+ASTNode* ASTNewThis(void);
 ASTNode* ASTNewVarRef(const char* name, int len);
 ASTNode* ASTNewVarDecl(TypeSyntax* type, const char* name, int len, ASTNode* init);
 ASTNode* ASTNewAssign(const char* name, int len, ASTNode* value);
 ASTNode* ASTNewBinaryOp(TokenType op, ASTNode* left, ASTNode* right);
 ASTNode* ASTNewUnaryOp(TokenType op, ASTNode* operand);
+ASTNode* ASTNewCast(TypeSyntax* target_type, ASTNode* expression);
 ASTNode* ASTNewLabel(const char* name, int len);
 ASTNode* ASTNewGoto(const char* target, int len);
 ASTNode* ASTNewTernaryOp(ASTNode* condition, ASTNode* true_expr,
@@ -216,6 +276,10 @@ ASTNode* ASTNewTernaryOp(ASTNode* condition, ASTNode* true_expr,
 ASTNode* ASTNewIndex(ASTNode* target, ASTNode* index);
 ASTNode* ASTNewIndexAssign(ASTNode* target, ASTNode* index, ASTNode* value);
 ASTNode* ASTNewArrayLenExpr(ASTNode* target);
+ASTNode* ASTNewMemberAccess(ASTNode* target, const char* name, int len);
+ASTNode* ASTNewMemberAssign(ASTNode* target, ASTNode* value);
+ASTNode* ASTNewMemberCall(ASTNode* target, const char* name, int len,
+                           ASTNode** args, int arg_count);
 ASTNode* ASTNewCall(const char* name, int len, ASTNode** args, int arg_count);
 ASTNode* ASTNewArrayLiteral(ASTNode** elements, int element_count);
 ASTNode* ASTNewBlock(ASTNode** stmts, int count);
@@ -229,6 +293,10 @@ ASTNode* ASTNewForeach(TypeSyntax* variable_type, const char* var_name,
 ASTNode* ASTNewFuncDecl(TypeSyntax* return_type, const char* name, int len,
                         ParameterSyntax* parameters, int parameter_count,
                         ASTNode* body);
+ASTNode* ASTNewConstructorDecl(ParameterSyntax* parameters,
+                               int parameter_count, ASTNode* body);
+ASTNode* ASTNewClassDecl(const char* name, int len, TypeSyntax* base_type,
+                         ASTNode** members, int member_count);
 ASTNode* ASTNewReturn(ASTNode* expr);
 
 /* break and continue carry no payload. D's labelled forms name the loop

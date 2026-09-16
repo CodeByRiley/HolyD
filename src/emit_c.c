@@ -32,10 +32,16 @@
 
 #include "emit_c.h"
 #include "ffi.h"
+#include "runtime.h"
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+typedef struct {
+  ASTNode *node;
+  int base_index;
+} CClass;
 
 typedef struct {
   FILE *out;
@@ -44,6 +50,14 @@ typedef struct {
   unsigned char *unsafe_symbols;
   ASTNode **functions; /* AST_FUNC_DECL nodes, in source order */
   int function_count;
+  CClass *classes;     /* AST_CLASS_DECL nodes, in source order */
+  int class_count;
+  /* Set only while emitting a class constructor or method.  Those bodies
+   * are deliberately native C: their receiver and parameters do not go
+   * through the boxed VM calling convention used by ordinary functions. */
+  int class_index;
+  ParameterSyntax *class_parameters;
+  int class_parameter_count;
   int temp_counter;  /* reset per emitted C function */
   /* -1 when the innermost loop lowers to a C loop a bare `continue` is
    * right for; otherwise the id of the label before that loop's increment. */
@@ -56,6 +70,53 @@ typedef struct {
 
 static void emit_expression(Emitter *e, ASTNode *node);
 static void emit_statement(Emitter *e, ASTNode *node, int indent);
+static const char *direct_binop(TokenType op);
+
+static int same_name(const char *a, int a_len, const char *b, int b_len) {
+  return a_len == b_len && strncmp(a, b, (size_t)a_len) == 0;
+}
+
+static int find_class(Emitter *e, const char *name, int length) {
+  for (int i = 0; i < e->class_count; i++) {
+    ASTClassDecl *decl = &e->classes[i].node->as.class_decl;
+    if (same_name(decl->name, decl->name_length, name, length))
+      return i;
+  }
+  return -1;
+}
+
+static int class_from_syntax(Emitter *e, const TypeSyntax *type) {
+  if (!type || type->kind != TYPE_SYNTAX_NAMED)
+    return -1;
+  return find_class(e, type->as.named.name, type->as.named.name_length);
+}
+
+static int class_from_type(Emitter *e, HDTypeId id) {
+  const HDType *type = HDTypeGet(e->types, id);
+  while (type && type->kind == HD_TYPE_QUALIFIED) {
+    id = type->primary;
+    type = HDTypeGet(e->types, id);
+  }
+  if (!type || type->kind != HD_TYPE_NAMED)
+    return -1;
+  return find_class(e, type->name, type->name_length);
+}
+
+static void write_class_name(Emitter *e, int index) {
+  fprintf(e->out, "hd_class_%d", index);
+}
+
+static void write_constructor_name(Emitter *e, int class_index, int ordinal) {
+  fprintf(e->out, "hd_new_%d_%d", class_index, ordinal);
+}
+
+static void write_initializer_name(Emitter *e, int class_index, int ordinal) {
+  fprintf(e->out, "hd_init_%d_%d", class_index, ordinal);
+}
+
+static void write_method_name(Emitter *e, int class_index, int member_index) {
+  fprintf(e->out, "hd_method_%d_%d", class_index, member_index);
+}
 
 /* Whether a `continue` in this statement belongs to the loop being emitted.
  * A nested loop captures its own, so the walk stops at one. It exists to
@@ -85,9 +146,56 @@ static void emit_error(Emitter *e, const char *message) {
   e->had_error = 1;
 }
 
+static void class_error(Emitter *e, const ASTNode *site, const char *message,
+                        const char *name, int name_length) {
+  if (e->had_error) return;
+  printf("Class error: ");
+  if (message)
+    printf(message, name_length, name);
+  if (site && site->span.start_line)
+    printf(" on line %zu", site->span.start_line);
+  fputs(".\n", stdout);
+  e->had_error = 1;
+}
+
+static void missing_member_error(Emitter *e, const ASTNode *site,
+                                 int class_index, const char *kind,
+                                 const char *name, int name_length,
+                                 int argument_count) {
+  if (e->had_error) return;
+  if (class_index >= 0) {
+    ASTClassDecl *decl = &e->classes[class_index].node->as.class_decl;
+    printf("Class error: class '%.*s' has no %s '%.*s'",
+           decl->name_length, decl->name, kind, name_length, name);
+    if (strcmp(kind, "method") == 0)
+      printf(" accepting %d argument%s", argument_count,
+             argument_count == 1 ? "" : "s");
+  } else {
+    printf("Class error: cannot determine the receiver class for %s '%.*s'",
+           kind, name_length, name);
+  }
+  if (site && site->span.start_line)
+    printf(" on line %zu", site->span.start_line);
+  fputs(".\n", stdout);
+  e->had_error = 1;
+}
+
 static int name_is(const char *a, int a_len, const char *b) {
   int b_len = (int)strlen(b);
   return a_len == b_len && strncmp(a, b, (size_t)a_len) == 0;
+}
+
+static int is_builtin_type_name(const char *name, int length) {
+  return name_is(name, length, "U0") || name_is(name, length, "void") ||
+         name_is(name, length, "I8") || name_is(name, length, "U8") ||
+         name_is(name, length, "I16") || name_is(name, length, "U16") ||
+         name_is(name, length, "I32") || name_is(name, length, "U32") ||
+         name_is(name, length, "I64") || name_is(name, length, "U64") ||
+         name_is(name, length, "int") || name_is(name, length, "uint") ||
+         name_is(name, length, "long") || name_is(name, length, "ulong") ||
+         name_is(name, length, "F64") || name_is(name, length, "double") ||
+         name_is(name, length, "Bool") || name_is(name, length, "bool") ||
+         name_is(name, length, "string") || name_is(name, length, "auto");
 }
 
 static int find_function(Emitter *e, const char *name, int len) {
@@ -208,7 +316,8 @@ static void write_env_name(Emitter *e, const char *name, int length) {
 typedef enum {
   C_REP_BOXED,
   C_REP_I64,
-  C_REP_F64
+  C_REP_F64,
+  C_REP_CLASS
 } CRepresentation;
 
 static CRepresentation type_representation(const HDTypeCheck *types,
@@ -244,18 +353,620 @@ static CRepresentation symbol_representation(Emitter *e,
     return C_REP_BOXED;
   if (e->unsafe_symbols && e->unsafe_symbols[symbol->id])
     return C_REP_BOXED;
-  return type_representation(e->types,
-                             HDTypeOfSymbol(e->types, symbol->id));
+  HDTypeId type = HDTypeOfSymbol(e->types, symbol->id);
+  if (class_from_type(e, type) >= 0)
+    return C_REP_CLASS;
+  return type_representation(e->types, type);
 }
 
 static CRepresentation node_representation(Emitter *e, const ASTNode *node) {
-  return node ? type_representation(e->types, HDTypeOfNode(e->types, node))
-              : C_REP_BOXED;
+  if (!node)
+    return C_REP_BOXED;
+  HDTypeId type = HDTypeOfNode(e->types, node);
+  return class_from_type(e, type) >= 0 ? C_REP_CLASS
+                                        : type_representation(e->types, type);
+}
+
+/* ---------------- Classes ------------------------------------------------- */
+
+/* Class metadata lives in the AST for now.  This small lookup layer keeps
+ * the generated C independent of source identifiers (which may collide with
+ * C keywords) and is also the natural place to grow overload/type checks. */
+static ASTNode *find_field(Emitter *e, int class_index, const char *name,
+                           int length, int *owner, int *member_index) {
+  for (int current = class_index; current >= 0;
+       current = e->classes[current].base_index) {
+    ASTClassDecl *decl = &e->classes[current].node->as.class_decl;
+    for (int i = 0; i < decl->member_count; i++) {
+      ASTNode *member = decl->members[i];
+      if (member && member->type == AST_VAR_DECL &&
+          same_name(member->as.variable_decl.name,
+                    member->as.variable_decl.name_length, name, length)) {
+        if (owner) *owner = current;
+        if (member_index) *member_index = i;
+        return member;
+      }
+    }
+  }
+  return NULL;
+}
+
+static ASTNode *find_method(Emitter *e, int class_index, const char *name,
+                            int length, int argc, int *owner,
+                            int *member_index) {
+  for (int current = class_index; current >= 0;
+       current = e->classes[current].base_index) {
+    ASTClassDecl *decl = &e->classes[current].node->as.class_decl;
+    for (int i = 0; i < decl->member_count; i++) {
+      ASTNode *member = decl->members[i];
+      if (member && member->type == AST_FUNC_DECL &&
+          member->as.function_decl.parameter_count == argc &&
+          same_name(member->as.function_decl.name,
+                    member->as.function_decl.name_length, name, length)) {
+        if (owner) *owner = current;
+        if (member_index) *member_index = i;
+        return member;
+      }
+    }
+  }
+  return NULL;
+}
+
+static int own_constructor_count(Emitter *e, int class_index) {
+  int count = 0;
+  ASTClassDecl *decl = &e->classes[class_index].node->as.class_decl;
+  for (int i = 0; i < decl->member_count; i++)
+    if (decl->members[i] && decl->members[i]->type == AST_CONSTRUCTOR_DECL)
+      count++;
+  return count;
+}
+
+static ASTNode *own_constructor_at(Emitter *e, int class_index, int ordinal) {
+  ASTClassDecl *decl = &e->classes[class_index].node->as.class_decl;
+  for (int i = 0; i < decl->member_count; i++) {
+    ASTNode *member = decl->members[i];
+    if (member && member->type == AST_CONSTRUCTOR_DECL && ordinal-- == 0)
+      return member;
+  }
+  return NULL;
+}
+
+/* A class without a constructor exposes its base constructors.  This is a
+ * temporary convenience rule (and why `ColoredPoint(1)` works in the sample)
+ * until the parser and semantic model grow explicit `super(...)` calls. */
+static int constructor_count(Emitter *e, int class_index) {
+  int own = own_constructor_count(e, class_index);
+  if (own) return own;
+  int base = e->classes[class_index].base_index;
+  return base >= 0 ? constructor_count(e, base) : 1;
+}
+
+static ASTNode *constructor_parameters_from(Emitter *e, int class_index,
+                                            int ordinal) {
+  int own = own_constructor_count(e, class_index);
+  if (own) return own_constructor_at(e, class_index, ordinal);
+  int base = e->classes[class_index].base_index;
+  return base >= 0 ? constructor_parameters_from(e, base, ordinal) : NULL;
+}
+
+static int constructor_for_arity(Emitter *e, int class_index, int argc) {
+  int count = constructor_count(e, class_index);
+  for (int i = 0; i < count; i++) {
+    ASTNode *constructor = constructor_parameters_from(e, class_index, i);
+    int parameter_count = constructor
+                              ? constructor->as.constructor_decl.parameter_count
+                              : 0;
+    if (parameter_count == argc)
+      return i;
+  }
+  return -1;
+}
+
+/* Class lowering needs concrete layouts, unlike the boxed runtime where an
+ * unknown named type can remain opaque.  Check every named type before any C
+ * is written so deleting `class Point` produces a source-level diagnostic,
+ * not a later failure while looking up `p.method()`. */
+static void validate_class_references(Emitter *e, const ASTNode *node);
+
+static void validate_class_type(Emitter *e, const TypeSyntax *type,
+                                const ASTNode *site) {
+  if (!type) return;
+  switch (type->kind) {
+  case TYPE_SYNTAX_NAMED:
+    if (!is_builtin_type_name(type->as.named.name,
+                              type->as.named.name_length) &&
+        find_class(e, type->as.named.name, type->as.named.name_length) < 0) {
+      class_error(e, site, "class '%.*s' does not exist",
+                  type->as.named.name, type->as.named.name_length);
+    }
+    break;
+  case TYPE_SYNTAX_POINTER:
+    validate_class_type(e, type->as.pointer.pointee, site);
+    break;
+  case TYPE_SYNTAX_STATIC_ARRAY:
+    validate_class_type(e, type->as.static_array.element_type, site);
+    validate_class_references(e, type->as.static_array.length_expression);
+    break;
+  case TYPE_SYNTAX_DYNAMIC_ARRAY:
+    validate_class_type(e, type->as.dynamic_array.element_type, site);
+    break;
+  case TYPE_SYNTAX_ASSOC_ARRAY:
+    validate_class_type(e, type->as.associative_array.value_type, site);
+    validate_class_type(e, type->as.associative_array.key_type, site);
+    break;
+  case TYPE_SYNTAX_FUNCTION:
+  case TYPE_SYNTAX_DELEGATE:
+    validate_class_type(e, type->as.callable.return_type, site);
+    for (int i = 0; i < type->as.callable.parameter_count; i++) {
+      ParameterSyntax *parameter = &type->as.callable.parameters[i];
+      validate_class_type(e, parameter->type, site);
+      validate_class_references(e, parameter->default_value);
+    }
+    break;
+  case TYPE_SYNTAX_QUALIFIED:
+    validate_class_type(e, type->as.qualified.base_type, site);
+    break;
+  case TYPE_SYNTAX_TYPEOF:
+    validate_class_references(e, type->as.typeof_expression.expression);
+    break;
+  }
+}
+
+static void validate_parameters(Emitter *e, ParameterSyntax *parameters,
+                                int parameter_count, const ASTNode *site) {
+  for (int i = 0; i < parameter_count; i++) {
+    validate_class_type(e, parameters[i].type, site);
+    validate_class_references(e, parameters[i].default_value);
+  }
+}
+
+static void validate_class_references(Emitter *e, const ASTNode *node) {
+  if (!node) return;
+  switch (node->type) {
+  case AST_VAR_DECL:
+    validate_class_type(e, node->as.variable_decl.declared_type, node);
+    validate_class_references(e, node->as.variable_decl.initializer);
+    break;
+  case AST_ASSIGN:
+    validate_class_references(e, node->as.assignment.value);
+    break;
+  case AST_INDEX_ASSIGN:
+    validate_class_references(e, node->as.index_assignment.target);
+    validate_class_references(e, node->as.index_assignment.index);
+    validate_class_references(e, node->as.index_assignment.value);
+    break;
+  case AST_MEMBER_ASSIGN:
+    validate_class_references(e, node->as.member_assignment.target);
+    validate_class_references(e, node->as.member_assignment.value);
+    break;
+  case AST_BINARY_OP:
+    validate_class_references(e, node->as.binary_op.left);
+    validate_class_references(e, node->as.binary_op.right);
+    break;
+  case AST_UNARY_OP:
+    validate_class_references(e, node->as.unary_op.operand);
+    break;
+  case AST_CAST:
+    validate_class_type(e, node->as.cast.target_type, node);
+    validate_class_references(e, node->as.cast.expression);
+    break;
+  case AST_TERNARY_OP:
+    validate_class_references(e, node->as.ternary_op.condition);
+    validate_class_references(e, node->as.ternary_op.true_expr);
+    validate_class_references(e, node->as.ternary_op.false_expr);
+    break;
+  case AST_CALL:
+    for (int i = 0; i < node->as.call.argument_count; i++)
+      validate_class_references(e, node->as.call.arguments[i]);
+    break;
+  case AST_MEMBER_ACCESS:
+    validate_class_references(e, node->as.member_access.target);
+    break;
+  case AST_MEMBER_CALL:
+    validate_class_references(e, node->as.member_call.target);
+    for (int i = 0; i < node->as.member_call.argument_count; i++)
+      validate_class_references(e, node->as.member_call.arguments[i]);
+    break;
+  case AST_ARRAY_LITERAL:
+    for (int i = 0; i < node->as.array_literal.element_count; i++)
+      validate_class_references(e, node->as.array_literal.elements[i]);
+    break;
+  case AST_INDEX:
+    validate_class_references(e, node->as.index_expr.target);
+    validate_class_references(e, node->as.index_expr.index);
+    break;
+  case AST_ARRAY_LEN_EXPR:
+    validate_class_references(e, node->as.array_length_expr.target);
+    break;
+  case AST_BLOCK:
+    for (int i = 0; i < node->as.block.statement_count; i++)
+      validate_class_references(e, node->as.block.statements[i]);
+    break;
+  case AST_IF:
+    validate_class_references(e, node->as.if_statement.condition);
+    validate_class_references(e, node->as.if_statement.then_branch);
+    validate_class_references(e, node->as.if_statement.else_branch);
+    break;
+  case AST_WHILE:
+    validate_class_references(e, node->as.while_statement.condition);
+    validate_class_references(e, node->as.while_statement.body);
+    break;
+  case AST_FOR:
+    validate_class_references(e, node->as.for_statement.initializer);
+    validate_class_references(e, node->as.for_statement.condition);
+    validate_class_references(e, node->as.for_statement.increment);
+    validate_class_references(e, node->as.for_statement.body);
+    break;
+  case AST_FOREACH:
+    validate_class_type(e, node->as.foreach_statement.variable_type, node);
+    validate_class_type(e, node->as.foreach_statement.index_type, node);
+    validate_class_references(e, node->as.foreach_statement.array_expression);
+    validate_class_references(e, node->as.foreach_statement.body);
+    break;
+  case AST_RETURN:
+    validate_class_references(e, node->as.return_statement.expression);
+    break;
+  case AST_FUNC_DECL:
+    validate_class_type(e, node->as.function_decl.return_type, node);
+    validate_parameters(e, node->as.function_decl.parameters,
+                        node->as.function_decl.parameter_count, node);
+    validate_class_references(e, node->as.function_decl.body);
+    break;
+  case AST_CONSTRUCTOR_DECL:
+    validate_parameters(e, node->as.constructor_decl.parameters,
+                        node->as.constructor_decl.parameter_count, node);
+    validate_class_references(e, node->as.constructor_decl.body);
+    break;
+  case AST_CLASS_DECL:
+    validate_class_type(e, node->as.class_decl.base_type, node);
+    for (int i = 0; i < node->as.class_decl.member_count; i++)
+      validate_class_references(e, node->as.class_decl.members[i]);
+    break;
+  default:
+    break;
+  }
+}
+
+static int initializer_class(Emitter *e, int class_index) {
+  while (class_index >= 0 && own_constructor_count(e, class_index) == 0)
+    class_index = e->classes[class_index].base_index;
+  return class_index;
+}
+
+static void write_field_name(Emitter *e, int owner, int member_index) {
+  fprintf(e->out, "hd_field_%d_%d", owner, member_index);
+}
+
+static void write_type_syntax(Emitter *e, const TypeSyntax *type,
+                              int permit_void) {
+  int class_index = class_from_syntax(e, type);
+  if (class_index >= 0) {
+    write_class_name(e, class_index);
+    fputs(" *", e->out);
+    return;
+  }
+  if (type && type->kind == TYPE_SYNTAX_NAMED) {
+    const char *name = type->as.named.name;
+    int length = type->as.named.name_length;
+    if (permit_void && (name_is(name, length, "U0") ||
+                        name_is(name, length, "void"))) {
+      fputs("void", e->out);
+      return;
+    }
+    if (name_is(name, length, "F64") || name_is(name, length, "double")) {
+      fputs("double", e->out);
+      return;
+    }
+    if (name_is(name, length, "Bool") || name_is(name, length, "bool") ||
+        name_is(name, length, "I8") || name_is(name, length, "U8") ||
+        name_is(name, length, "I16") || name_is(name, length, "U16") ||
+        name_is(name, length, "I32") || name_is(name, length, "U32") ||
+        name_is(name, length, "I64") || name_is(name, length, "U64") ||
+        name_is(name, length, "int")) {
+      fputs("long long", e->out);
+      return;
+    }
+  }
+  emit_error(e, "class fields, parameters and results must currently use scalar or class types.");
+  fputs("long long", e->out);
+}
+
+static int syntax_is_f64(Emitter *e, const TypeSyntax *type) {
+  (void)e;
+  return type && type->kind == TYPE_SYNTAX_NAMED &&
+         (name_is(type->as.named.name, type->as.named.name_length, "F64") ||
+          name_is(type->as.named.name, type->as.named.name_length, "double"));
+}
+
+static int class_of_expression(Emitter *e, ASTNode *node) {
+  if (!node) return -1;
+  switch (node->type) {
+  case AST_THIS:
+    return e->class_index;
+  case AST_VAR_REF: {
+    if (e->class_index >= 0) {
+      for (int i = 0; i < e->class_parameter_count; i++) {
+        ParameterSyntax *parameter = &e->class_parameters[i];
+        if (parameter->name && same_name(parameter->name,
+                                         parameter->name_length,
+                                         node->as.variable_ref.name,
+                                         node->as.variable_ref.name_length))
+          return class_from_syntax(e, parameter->type);
+      }
+    }
+    const HDSymbol *symbol = symbol_for(e, node, HD_BINDING_READ);
+    return symbol ? class_from_type(e, HDTypeOfSymbol(e->types, symbol->id))
+                  : -1;
+  }
+  case AST_CALL:
+    return find_class(e, node->as.call.callee_name,
+                      node->as.call.callee_name_length);
+  case AST_MEMBER_ACCESS: {
+    int target = class_of_expression(e, node->as.member_access.target);
+    ASTNode *field = find_field(e, target, node->as.member_access.name,
+                                node->as.member_access.name_length, NULL, NULL);
+    return field ? class_from_syntax(e, field->as.variable_decl.declared_type)
+                 : -1;
+  }
+  case AST_MEMBER_CALL: {
+    int target = class_of_expression(e, node->as.member_call.target);
+    ASTNode *method = find_method(e, target, node->as.member_call.name,
+                                  node->as.member_call.name_length,
+                                  node->as.member_call.argument_count,
+                                  NULL, NULL);
+    return method ? class_from_syntax(e, method->as.function_decl.return_type)
+                  : -1;
+  }
+  default:
+    return -1;
+  }
+}
+
+static void emit_class_native_expression(Emitter *e, ASTNode *node);
+
+static void emit_class_load(Emitter *e, ASTNode *node) {
+  if (e->class_index >= 0) {
+    for (int i = 0; i < e->class_parameter_count; i++) {
+      ParameterSyntax *parameter = &e->class_parameters[i];
+      if (parameter->name && same_name(parameter->name, parameter->name_length,
+                                       node->as.variable_ref.name,
+                                       node->as.variable_ref.name_length)) {
+        fprintf(e->out, "p%d", i);
+        return;
+      }
+    }
+  }
+  const HDSymbol *symbol = symbol_for(e, node, HD_BINDING_READ);
+  if (symbol && symbol_representation(e, symbol) == C_REP_CLASS) {
+    write_slot_name(e, symbol);
+    return;
+  }
+  emit_error(e, "class expression names no class-valued parameter or variable.");
+  fputs("NULL", e->out);
+}
+
+static void emit_field_lvalue(Emitter *e, ASTNode *target, int target_class,
+                              int owner, int member_index) {
+  fputc('(', e->out);
+  emit_class_native_expression(e, target);
+  fputc(')', e->out);
+  for (int current = target_class; current >= 0 && current != owner;
+       current = e->classes[current].base_index)
+    fputs("->hd_base", e->out);
+  fputs("->", e->out);
+  write_field_name(e, owner, member_index);
+}
+
+static void emit_method_receiver(Emitter *e, ASTNode *target, int target_class,
+                                 int owner) {
+  if (target_class == owner) {
+    emit_class_native_expression(e, target);
+    return;
+  }
+  fputs("&(", e->out);
+  emit_class_native_expression(e, target);
+  fputc(')', e->out);
+  for (int current = target_class; current >= 0 && current != owner;
+       current = e->classes[current].base_index)
+    fputs("->hd_base", e->out);
+}
+
+static void emit_constructor_call(Emitter *e, ASTNode *node) {
+  int class_index = find_class(e, node->as.call.callee_name,
+                               node->as.call.callee_name_length);
+  int ordinal = constructor_for_arity(e, class_index,
+                                      node->as.call.argument_count);
+  if (ordinal < 0) {
+    emit_error(e, "no class constructor matches this argument count.");
+    fputs("NULL", e->out);
+    return;
+  }
+  write_constructor_name(e, class_index, ordinal);
+  fputc('(', e->out);
+  for (int i = 0; i < node->as.call.argument_count; i++) {
+    if (i) fputs(", ", e->out);
+    emit_class_native_expression(e, node->as.call.arguments[i]);
+  }
+  fputc(')', e->out);
+}
+
+static void emit_class_native_expression(Emitter *e, ASTNode *node) {
+  if (!node) { fputs("0", e->out); return; }
+  switch (node->type) {
+  case AST_NUMBER:
+    fprintf(e->out, "%lldLL", node->as.integer_literal.value);
+    break;
+  case AST_FLOAT:
+    fprintf(e->out, "%.17g", node->as.float_literal.value);
+    break;
+  case AST_THIS:
+    if (e->class_index < 0) {
+      emit_error(e, "'this' appears outside a class member.");
+      fputs("NULL", e->out);
+    } else fputs("self", e->out);
+    break;
+  case AST_VAR_REF:
+    if (class_of_expression(e, node) >= 0) emit_class_load(e, node);
+    else {
+      int found = 0;
+      if (e->class_index >= 0) {
+        for (int i = 0; i < e->class_parameter_count; i++) {
+          ParameterSyntax *parameter = &e->class_parameters[i];
+          if (parameter->name && same_name(parameter->name, parameter->name_length,
+                                           node->as.variable_ref.name,
+                                           node->as.variable_ref.name_length)) {
+            fprintf(e->out, "p%d", i);
+            found = 1;
+            break;
+          }
+        }
+      }
+      if (!found) {
+        const HDSymbol *symbol = symbol_for(e, node, HD_BINDING_READ);
+        if (symbol && symbol_representation(e, symbol) == C_REP_I64) {
+          write_slot_name(e, symbol);
+          found = 1;
+        }
+      }
+      if (!found) {
+        emit_error(e, "class member expression names an unsupported local.");
+        fputs("0", e->out);
+      }
+    }
+    break;
+  case AST_BINARY_OP: {
+    const char *op = direct_binop(node->as.binary_op.operator_type);
+    if (!op) {
+      emit_error(e, "class member uses an unsupported binary operator.");
+      fputs("0", e->out);
+      break;
+    }
+    fputc('(', e->out);
+    emit_class_native_expression(e, node->as.binary_op.left);
+    fprintf(e->out, " %s ", op);
+    emit_class_native_expression(e, node->as.binary_op.right);
+    fputc(')', e->out);
+    break;
+  }
+  case AST_UNARY_OP:
+    if (node->as.unary_op.operator_type == TOKEN_MINUS) {
+      fputs("(-", e->out);
+      emit_class_native_expression(e, node->as.unary_op.operand);
+      fputc(')', e->out);
+    } else {
+      emit_error(e, "class member uses an unsupported unary operator.");
+      fputs("0", e->out);
+    }
+    break;
+  case AST_CAST: {
+    HDCastKind kind;
+    if (!HDCastKindFromTypeSyntax(node->as.cast.target_type, &kind)) {
+      emit_error(e, "class casts require Bool, an integer type, or F64.");
+      fputs("0", e->out);
+      break;
+    }
+    if (kind == HD_CAST_FLOAT) fputs("((double)", e->out);
+    else if (kind == HD_CAST_INT) fputs("((long long)", e->out);
+    else fputs("((", e->out);
+    emit_class_native_expression(e, node->as.cast.expression);
+    fputs(kind == HD_CAST_BOOL ? ") ? 1LL : 0LL)" : ")", e->out);
+    break;
+  }
+  case AST_CALL:
+    if (find_class(e, node->as.call.callee_name,
+                   node->as.call.callee_name_length) >= 0)
+      emit_constructor_call(e, node);
+    else {
+      emit_error(e, "class member calls an unsupported non-constructor.");
+      fputs("0", e->out);
+    }
+    break;
+  case AST_MEMBER_ACCESS: {
+    int target = class_of_expression(e, node->as.member_access.target);
+    int owner = -1, member_index = -1;
+    if (!find_field(e, target, node->as.member_access.name,
+                    node->as.member_access.name_length, &owner, &member_index)) {
+      missing_member_error(e, node, target, "field",
+                           node->as.member_access.name,
+                           node->as.member_access.name_length, 0);
+      fputs("0", e->out);
+    } else emit_field_lvalue(e, node->as.member_access.target, target, owner,
+                              member_index);
+    break;
+  }
+  case AST_MEMBER_CALL: {
+    int target = class_of_expression(e, node->as.member_call.target);
+    int owner = -1, member_index = -1;
+    ASTNode *method = find_method(e, target, node->as.member_call.name,
+                                  node->as.member_call.name_length,
+                                  node->as.member_call.argument_count,
+                                  &owner, &member_index);
+    if (!method) {
+      missing_member_error(e, node, target, "method",
+                           node->as.member_call.name,
+                           node->as.member_call.name_length,
+                           node->as.member_call.argument_count);
+      fputs("0", e->out);
+      break;
+    }
+    write_method_name(e, owner, member_index);
+    fputc('(', e->out);
+    emit_method_receiver(e, node->as.member_call.target, target, owner);
+    for (int i = 0; i < node->as.member_call.argument_count; i++) {
+      fputs(", ", e->out);
+      emit_class_native_expression(e, node->as.member_call.arguments[i]);
+    }
+    fputc(')', e->out);
+    break;
+  }
+  default:
+    emit_error(e, "unsupported expression in native class code.");
+    fputs("0", e->out);
+    break;
+  }
+}
+
+/* Ordinary HolyD expressions still return HDValue.  A class field/method is
+ * native inside the generated struct code, so this adapter boxes scalar
+ * results at the boundary where the existing runtime (for example PrintLn)
+ * expects an HDValue. */
+static void emit_class_member_boxed(Emitter *e, ASTNode *node) {
+  const TypeSyntax *type = NULL;
+  if (node->type == AST_MEMBER_ACCESS) {
+    int target = class_of_expression(e, node->as.member_access.target);
+    ASTNode *field = find_field(e, target, node->as.member_access.name,
+                                node->as.member_access.name_length, NULL, NULL);
+    type = field ? field->as.variable_decl.declared_type : NULL;
+  } else if (node->type == AST_MEMBER_CALL) {
+    int target = class_of_expression(e, node->as.member_call.target);
+    ASTNode *method = find_method(e, target, node->as.member_call.name,
+                                  node->as.member_call.name_length,
+                                  node->as.member_call.argument_count,
+                                  NULL, NULL);
+    type = method ? method->as.function_decl.return_type : NULL;
+  }
+  if (class_from_syntax(e, type) >= 0) {
+    emit_error(e, "using a class reference as a boxed value is not implemented yet.");
+    fputs("int_value(0)", e->out);
+    return;
+  }
+  fputs(syntax_is_f64(e, type) ? "float_value(" : "int_value(", e->out);
+  emit_class_native_expression(e, node);
+  fputc(')', e->out);
 }
 
 static int expression_representation_is_stable(Emitter *e, ASTNode *node,
                                                CRepresentation expected) {
-  if (!node || node_representation(e, node) != expected)
+  if (!node)
+    return 0;
+  /* Constructor calls are typed by the class table rather than the general
+   * checker for this first lowering slice, so recognise them before asking
+   * the scalar checker for the expression's representation. */
+  if (expected == C_REP_CLASS && node->type == AST_CALL &&
+      find_class(e, node->as.call.callee_name,
+                 node->as.call.callee_name_length) >= 0)
+    return 1;
+  if (node_representation(e, node) != expected)
     return 0;
   switch (node->type) {
   case AST_NUMBER:
@@ -589,6 +1300,9 @@ static void count_expression(Emitter *e, ASTNode *node, int *max_argc,
   case AST_UNARY_OP:
     count_expression(e, node->as.unary_op.operand, max_argc, capacity);
     break;
+  case AST_CAST:
+    count_expression(e, node->as.cast.expression, max_argc, capacity);
+    break;
   case AST_TERNARY_OP:
     count_expression(e, node->as.ternary_op.condition, max_argc, capacity);
     count_expression(e, node->as.ternary_op.true_expr, max_argc, capacity);
@@ -597,8 +1311,20 @@ static void count_expression(Emitter *e, ASTNode *node, int *max_argc,
   case AST_ARRAY_LEN_EXPR:
     count_expression(e, node->as.array_length_expr.target, max_argc, capacity);
     break;
+  case AST_MEMBER_ACCESS:
+    count_expression(e, node->as.member_access.target, max_argc, capacity);
+    break;
+  case AST_MEMBER_CALL:
+    count_expression(e, node->as.member_call.target, max_argc, capacity);
+    for (int i = 0; i < node->as.member_call.argument_count; i++)
+      count_expression(e, node->as.member_call.arguments[i], max_argc, capacity);
+    break;
   case AST_CALL:
-    count_call(e, node, node->as.call.argument_count, max_argc, capacity);
+    /* A class constructor lowers directly to a native factory and therefore
+     * needs no HDValue argument array. */
+    if (find_class(e, node->as.call.callee_name,
+                   node->as.call.callee_name_length) < 0)
+      count_call(e, node, node->as.call.argument_count, max_argc, capacity);
     for (int i = 0; i < node->as.call.argument_count; i++)
       count_expression(e, node->as.call.arguments[i], max_argc, capacity);
     break;
@@ -625,6 +1351,10 @@ static void count_statement(Emitter *e, ASTNode *node, int *max_argc,
     break;
   case AST_ASSIGN:
     count_expression(e, node->as.assignment.value, max_argc, capacity);
+    break;
+  case AST_MEMBER_ASSIGN:
+    count_expression(e, node->as.member_assignment.target, max_argc, capacity);
+    count_expression(e, node->as.member_assignment.value, max_argc, capacity);
     break;
   case AST_INDEX_ASSIGN:
     count_call(e, node, 3, max_argc, capacity); /* target, index, value */
@@ -913,6 +1643,7 @@ static void emit_direct_scalar_body(Emitter *e, ASTNode *node) {
     emit_scalar_value(e, node->as.binary_op.right, operands);
     fputc(')', e->out);
     break;
+
   }
   case AST_UNARY_OP:
     fputs("(-", e->out);
@@ -1050,6 +1781,11 @@ static void emit_expression(Emitter *e, ASTNode *node) {
               node->as.variable_ref.name_length);
     break;
 
+  case AST_MEMBER_ACCESS:
+  case AST_MEMBER_CALL:
+    emit_class_member_boxed(e, node);
+    break;
+
   case AST_BINARY_OP: {
     /* C's && and || short-circuit exactly as the VM's jumps do, and yield
      * 0 or 1 like the VM's normalising pushes, so these lower to the C
@@ -1108,6 +1844,19 @@ static void emit_expression(Emitter *e, ASTNode *node) {
       fputs("int_value(0)", e->out);
     }
     break;
+
+  case AST_CAST: {
+    HDCastKind kind;
+    if (!HDCastKindFromTypeSyntax(node->as.cast.target_type, &kind)) {
+      emit_error(e, "cast target must be Bool, an integer type, or F64.");
+      fputs("int_value(0)", e->out);
+      break;
+    }
+    fprintf(e->out, "HDCastX(%d, ", (int)kind);
+    emit_expression(e, node->as.cast.expression);
+    fputc(')', e->out);
+    break;
+  }
 
   case AST_TERNARY_OP:
     if (direct_scalar_expression(e, node)) {
@@ -1173,7 +1922,22 @@ static void emit_statement(Emitter *e, ASTNode *node, int indent) {
   case AST_VAR_DECL: {
     const HDSymbol *symbol = symbol_for(e, node, HD_BINDING_DECLARATION);
     CRepresentation representation = symbol_representation(e, symbol);
-    if (representation != C_REP_BOXED) {
+    if (representation == C_REP_CLASS) {
+      indent_by(e, indent);
+      write_slot_name(e, symbol);
+      fputs(" = ", e->out);
+      if (node->as.variable_decl.initializer)
+        emit_class_native_expression(e, node->as.variable_decl.initializer);
+      else
+        fputs("NULL", e->out);
+      fputs(";", e->out);
+      if (has_bound_bit(symbol)) {
+        fputc(' ', e->out);
+        write_bound_name(e, symbol);
+        fputs(" = 1;", e->out);
+      }
+      fputc('\n', e->out);
+    } else if (representation != C_REP_BOXED) {
       indent_by(e, indent);
       write_slot_name(e, symbol);
       fputs(" = ", e->out);
@@ -1202,6 +1966,32 @@ static void emit_statement(Emitter *e, ASTNode *node, int indent) {
     emit_expression(e, node->as.assignment.value);
     emit_store_close(e, symbol, node->as.assignment.name,
                      node->as.assignment.name_length, indent, id);
+    break;
+  }
+
+  case AST_MEMBER_ASSIGN: {
+    ASTNode *target = node->as.member_assignment.target;
+    if (!target || target->type != AST_MEMBER_ACCESS) {
+      emit_error(e, "member assignment target is not a member access.");
+      break;
+    }
+    int target_class = class_of_expression(e, target->as.member_access.target);
+    int owner = -1, member_index = -1;
+    ASTNode *field = find_field(e, target_class, target->as.member_access.name,
+                                target->as.member_access.name_length, &owner,
+                                &member_index);
+    if (!field) {
+      missing_member_error(e, node, target_class, "field",
+                           target->as.member_access.name,
+                           target->as.member_access.name_length, 0);
+      break;
+    }
+    indent_by(e, indent);
+    emit_field_lvalue(e, target->as.member_access.target, target_class, owner,
+                      member_index);
+    fputs(" = ", e->out);
+    emit_class_native_expression(e, node->as.member_assignment.value);
+    fputs(";\n", e->out);
     break;
   }
 
@@ -1466,6 +2256,8 @@ static int expr_calls(Emitter *e, ASTNode *node, const char *name, int len) {
            expr_calls(e, node->as.index_expr.index, name, len);
   case AST_UNARY_OP:
     return expr_calls(e, node->as.unary_op.operand, name, len);
+  case AST_CAST:
+    return expr_calls(e, node->as.cast.expression, name, len);
   case AST_ARRAY_LEN_EXPR:
     return expr_calls(e, node->as.array_length_expr.target, name, len);
   case AST_CALL:
@@ -1537,6 +2329,307 @@ static int stmt_calls(Emitter *e, ASTNode *node, const char *name, int len) {
   }
 }
 
+static void emit_parameter_list(Emitter *e, ParameterSyntax *parameters,
+                                int parameter_count, int with_self,
+                                int self_class) {
+  int wrote = 0;
+  if (with_self) {
+    write_class_name(e, self_class);
+    fputs(" *self", e->out);
+    wrote = 1;
+  }
+  for (int i = 0; i < parameter_count; i++) {
+    if (wrote) fputs(", ", e->out);
+    write_type_syntax(e, parameters[i].type, 0);
+    fprintf(e->out, " p%d", i);
+    wrote = 1;
+  }
+  if (!wrote) fputs("void", e->out);
+}
+
+static void emit_class_statement(Emitter *e, ASTNode *node, int indent,
+                                 int returns_void) {
+  if (!node) return;
+  switch (node->type) {
+  case AST_BLOCK:
+    for (int i = 0; i < node->as.block.statement_count; i++)
+      emit_class_statement(e, node->as.block.statements[i], indent,
+                           returns_void);
+    break;
+  case AST_MEMBER_ASSIGN: {
+    ASTNode *target = node->as.member_assignment.target;
+    if (!target || target->type != AST_MEMBER_ACCESS) {
+      emit_error(e, "class assignment target is not a field.");
+      break;
+    }
+    int target_class = class_of_expression(e, target->as.member_access.target);
+    int owner = -1, member_index = -1;
+    ASTNode *field = find_field(e, target_class, target->as.member_access.name,
+                                target->as.member_access.name_length, &owner,
+                                &member_index);
+    if (!field) {
+      missing_member_error(e, node, target_class, "field",
+                           target->as.member_access.name,
+                           target->as.member_access.name_length, 0);
+      break;
+    }
+    indent_by(e, indent);
+    emit_field_lvalue(e, target->as.member_access.target, target_class, owner,
+                      member_index);
+    fputs(" = ", e->out);
+    emit_class_native_expression(e, node->as.member_assignment.value);
+    fputs(";\n", e->out);
+    break;
+  }
+  case AST_VAR_DECL:
+    /* A class body has no resolver frame yet, so its locals use a stable
+     * member-local spelling.  This is intentionally small but enough for
+     * constructor temporaries without leaking them into global resolution. */
+    indent_by(e, indent);
+    write_type_syntax(e, node->as.variable_decl.declared_type, 0);
+    fprintf(e->out, " hd_local_%.*s", node->as.variable_decl.name_length,
+            node->as.variable_decl.name);
+    if (node->as.variable_decl.initializer) {
+      fputs(" = ", e->out);
+      emit_class_native_expression(e, node->as.variable_decl.initializer);
+    }
+    fputs(";\n", e->out);
+    break;
+  case AST_RETURN:
+    indent_by(e, indent);
+    if (returns_void) {
+      fputs("return;\n", e->out);
+    } else {
+      fputs("return ", e->out);
+      emit_class_native_expression(e, node->as.return_statement.expression);
+      fputs(";\n", e->out);
+    }
+    break;
+  case AST_IF:
+    indent_by(e, indent);
+    fputs("if (", e->out);
+    emit_class_native_expression(e, node->as.if_statement.condition);
+    fputs(") {\n", e->out);
+    emit_class_statement(e, node->as.if_statement.then_branch, indent + 1,
+                         returns_void);
+    indent_by(e, indent);
+    fputs("}\n", e->out);
+    if (node->as.if_statement.else_branch) {
+      indent_by(e, indent);
+      fputs("else {\n", e->out);
+      emit_class_statement(e, node->as.if_statement.else_branch, indent + 1,
+                           returns_void);
+      indent_by(e, indent);
+      fputs("}\n", e->out);
+    }
+    break;
+  case AST_MEMBER_CALL:
+  case AST_CALL:
+    indent_by(e, indent);
+    fputs("(void)", e->out);
+    emit_class_native_expression(e, node);
+    fputs(";\n", e->out);
+    break;
+  default:
+    emit_error(e, "unsupported statement in a class member.");
+    break;
+  }
+}
+
+static void emit_field_initializers(Emitter *e, int class_index, int indent) {
+  ASTClassDecl *decl = &e->classes[class_index].node->as.class_decl;
+  for (int i = 0; i < decl->member_count; i++) {
+    ASTNode *field = decl->members[i];
+    if (!field || field->type != AST_VAR_DECL ||
+        !field->as.variable_decl.initializer)
+      continue;
+    indent_by(e, indent);
+    fputs("self->", e->out);
+    write_field_name(e, class_index, i);
+    fputs(" = ", e->out);
+    emit_class_native_expression(e, field->as.variable_decl.initializer);
+    fputs(";\n", e->out);
+  }
+}
+
+static void emit_class_layouts(Emitter *e) {
+  for (int c = 0; c < e->class_count; c++) {
+    fputs("typedef struct ", e->out);
+    write_class_name(e, c);
+    fputc(' ', e->out);
+    write_class_name(e, c);
+    fputs(";\n", e->out);
+  }
+  if (e->class_count) fputc('\n', e->out);
+
+  for (int c = 0; c < e->class_count; c++) {
+    int base = e->classes[c].base_index;
+    if (base > c) {
+      emit_error(e, "a class base must be declared before its derived class for C emission.");
+      continue;
+    }
+    fputs("struct ", e->out);
+    write_class_name(e, c);
+    fputs(" {\n", e->out);
+    if (base >= 0) {
+      fputs("  ", e->out);
+      write_class_name(e, base);
+      fputs(" hd_base;\n", e->out);
+    }
+    ASTClassDecl *decl = &e->classes[c].node->as.class_decl;
+    for (int i = 0; i < decl->member_count; i++) {
+      ASTNode *field = decl->members[i];
+      if (!field || field->type != AST_VAR_DECL) continue;
+      fputs("  ", e->out);
+      write_type_syntax(e, field->as.variable_decl.declared_type, 0);
+      fputc(' ', e->out);
+      write_field_name(e, c, i);
+      fputs(";\n", e->out);
+    }
+    fputs("};\n\n", e->out);
+  }
+}
+
+static void emit_class_prototypes(Emitter *e) {
+  for (int c = 0; c < e->class_count; c++) {
+    int constructors = constructor_count(e, c);
+    for (int ordinal = 0; ordinal < constructors; ordinal++) {
+      ASTNode *constructor = constructor_parameters_from(e, c, ordinal);
+      ParameterSyntax *parameters = constructor
+                                       ? constructor->as.constructor_decl.parameters
+                                       : NULL;
+      int parameter_count = constructor
+                                ? constructor->as.constructor_decl.parameter_count
+                                : 0;
+      fputs("static HD_CLASS_UNUSED ", e->out);
+      write_class_name(e, c);
+      fputs(" *", e->out);
+      write_constructor_name(e, c, ordinal);
+      fputc('(', e->out);
+      emit_parameter_list(e, parameters, parameter_count, 0, c);
+      fputs(");\n", e->out);
+    }
+    ASTClassDecl *decl = &e->classes[c].node->as.class_decl;
+    for (int i = 0; i < decl->member_count; i++) {
+      ASTNode *method = decl->members[i];
+      if (!method || method->type != AST_FUNC_DECL) continue;
+      fputs("static HD_CLASS_UNUSED ", e->out);
+      write_type_syntax(e, method->as.function_decl.return_type, 1);
+      fputc(' ', e->out);
+      write_method_name(e, c, i);
+      fputc('(', e->out);
+      emit_parameter_list(e, method->as.function_decl.parameters,
+                          method->as.function_decl.parameter_count, 1, c);
+      fputs(");\n", e->out);
+    }
+  }
+  if (e->class_count) fputc('\n', e->out);
+}
+
+static void emit_initializer_receiver(Emitter *e, int class_index,
+                                      int owner) {
+  fputs("&self->hd_base", e->out);
+  for (int current = e->classes[class_index].base_index;
+       current >= 0 && current != owner;
+       current = e->classes[current].base_index)
+    fputs(".hd_base", e->out);
+}
+
+static void emit_class_definitions(Emitter *e) {
+  for (int c = 0; c < e->class_count; c++) {
+    int constructors = constructor_count(e, c);
+    for (int ordinal = 0; ordinal < constructors; ordinal++) {
+      int owner = initializer_class(e, c);
+      ASTNode *constructor = constructor_parameters_from(e, c, ordinal);
+      ParameterSyntax *parameters = constructor
+                                       ? constructor->as.constructor_decl.parameters
+                                       : NULL;
+      int parameter_count = constructor
+                                ? constructor->as.constructor_decl.parameter_count
+                                : 0;
+      if (owner == c && constructor) {
+        fputs("static void ", e->out);
+        write_initializer_name(e, c, ordinal);
+        fputc('(', e->out);
+        emit_parameter_list(e, parameters, parameter_count, 1, c);
+        fputs(") {\n", e->out);
+        e->class_index = c;
+        e->class_parameters = parameters;
+        e->class_parameter_count = parameter_count;
+        emit_field_initializers(e, c, 1);
+        emit_class_statement(e, constructor->as.constructor_decl.body, 1, 1);
+        e->class_index = -1;
+        e->class_parameters = NULL;
+        e->class_parameter_count = 0;
+        fputs("}\n\n", e->out);
+      }
+
+      fputs("static HD_CLASS_UNUSED ", e->out);
+      write_class_name(e, c);
+      fputs(" *", e->out);
+      write_constructor_name(e, c, ordinal);
+      fputc('(', e->out);
+      emit_parameter_list(e, parameters, parameter_count, 0, c);
+      fputs(") {\n  ", e->out);
+      write_class_name(e, c);
+      fputs(" *self = calloc(1, sizeof(*self));\n  if (!self) return NULL;\n",
+            e->out);
+      if (owner == c && constructor) {
+        fputs("  ", e->out);
+        write_initializer_name(e, c, ordinal);
+        fputs("(self", e->out);
+      } else if (owner >= 0) {
+        fputs("  ", e->out);
+        write_initializer_name(e, owner, ordinal);
+        fputc('(', e->out);
+        emit_initializer_receiver(e, c, owner);
+      } else {
+        fputs("  /* implicit zero-argument constructor */", e->out);
+      }
+      if ((owner == c && constructor) || owner >= 0) {
+        for (int i = 0; i < parameter_count; i++) fprintf(e->out, ", p%d", i);
+        fputs(");\n", e->out);
+      } else fputc('\n', e->out);
+      if (owner != c)
+        emit_field_initializers(e, c, 1);
+      fputs("  return self;\n}\n\n", e->out);
+    }
+
+    ASTClassDecl *decl = &e->classes[c].node->as.class_decl;
+    for (int i = 0; i < decl->member_count; i++) {
+      ASTNode *method = decl->members[i];
+      if (!method || method->type != AST_FUNC_DECL) continue;
+      int returns_void = method->as.function_decl.return_type &&
+                         method->as.function_decl.return_type->kind == TYPE_SYNTAX_NAMED &&
+                         (name_is(method->as.function_decl.return_type->as.named.name,
+                                  method->as.function_decl.return_type->as.named.name_length,
+                                  "U0") ||
+                          name_is(method->as.function_decl.return_type->as.named.name,
+                                  method->as.function_decl.return_type->as.named.name_length,
+                                  "void"));
+      fputs("static HD_CLASS_UNUSED ", e->out);
+      write_type_syntax(e, method->as.function_decl.return_type, 1);
+      fputc(' ', e->out);
+      write_method_name(e, c, i);
+      fputc('(', e->out);
+      emit_parameter_list(e, method->as.function_decl.parameters,
+                          method->as.function_decl.parameter_count, 1, c);
+      fputs(") {\n", e->out);
+      e->class_index = c;
+      e->class_parameters = method->as.function_decl.parameters;
+      e->class_parameter_count = method->as.function_decl.parameter_count;
+      fputs("  (void)self;\n", e->out);
+      emit_class_statement(e, method->as.function_decl.body, 1, returns_void);
+      if (returns_void) fputs("  return;\n", e->out);
+      else fputs("  return 0;\n", e->out);
+      e->class_index = -1;
+      e->class_parameters = NULL;
+      e->class_parameter_count = 0;
+      fputs("}\n\n", e->out);
+    }
+  }
+}
+
 /* ---------------- Translation unit ---------------------------------------- */
 
 /* One C declaration per frame slot. Parameters take their argument and no
@@ -1563,10 +2656,15 @@ static void declare_frame(Emitter *e, const HDResolvedFunction *scope,
 
     indent_by(e, indent);
     CRepresentation representation = symbol_representation(e, symbol);
-    fputs(representation == C_REP_I64 ? "long long "
-          : representation == C_REP_F64 ? "double "
-                                        : "HDValue ",
-          e->out);
+    if (representation == C_REP_CLASS) {
+      write_class_name(e, class_from_type(e, HDTypeOfSymbol(e->types, symbol->id)));
+      fputs(" *", e->out);
+    } else {
+      fputs(representation == C_REP_I64 ? "long long "
+            : representation == C_REP_F64 ? "double "
+                                          : "HDValue ",
+            e->out);
+    }
     write_slot_name(e, symbol);
     if (parameter >= 0) {
       fputs(" = ", e->out);
@@ -1578,6 +2676,8 @@ static void declare_frame(Emitter *e, const HDResolvedFunction *scope,
         fprintf(e->out, "p%d;\n", parameter);
     } else if (representation == C_REP_BOXED) {
       fputs(" = {0};\n", e->out);
+    } else if (representation == C_REP_CLASS) {
+      fputs(" = NULL;\n", e->out);
     } else {
       fputs(" = 0;\n", e->out);
     }
@@ -1587,6 +2687,12 @@ static void declare_frame(Emitter *e, const HDResolvedFunction *scope,
       fputs("int ", e->out);
       write_bound_name(e, symbol);
       fputs(" = 0;\n", e->out);
+      if (representation == C_REP_CLASS) {
+        indent_by(e, indent);
+        fputs("(void)", e->out);
+        write_bound_name(e, symbol);
+        fputs(";\n", e->out);
+      }
     }
 
     /* A slot the body only ever writes is still a slot. Say so, rather than
@@ -1639,6 +2745,11 @@ int HDEmitC(ASTNode *ast, const HDResolution *resolution,
   e.unsafe_symbols = NULL;
   e.functions = NULL;
   e.function_count = 0;
+  e.classes = NULL;
+  e.class_count = 0;
+  e.class_index = -1;
+  e.class_parameters = NULL;
+  e.class_parameter_count = 0;
   e.temp_counter = 0;
   e.store_counter = 0;
   e.continue_label = -1;
@@ -1664,9 +2775,39 @@ int HDEmitC(ASTNode *ast, const HDResolution *resolution,
       e.functions[e.function_count++] = stmt;
   }
 
+  e.classes = (CClass *)calloc((size_t)ast->as.block.statement_count + 1,
+                               sizeof(CClass));
+  if (!e.classes) {
+    emit_error(&e, "out of memory while collecting classes.");
+    free(e.functions);
+    return 0;
+  }
+  for (int i = 0; i < ast->as.block.statement_count; i++) {
+    ASTNode *stmt = ast->as.block.statements[i];
+    if (stmt && stmt->type == AST_CLASS_DECL) {
+      e.classes[e.class_count].node = stmt;
+      e.classes[e.class_count].base_index = -1;
+      e.class_count++;
+    }
+  }
+  for (int i = 0; i < e.class_count; i++) {
+    TypeSyntax *base = e.classes[i].node->as.class_decl.base_type;
+    if (!base) continue;
+    e.classes[i].base_index = class_from_syntax(&e, base);
+  }
+
+  if (e.class_count > 0)
+    validate_class_references(&e, ast);
+  if (e.had_error) {
+    free(e.classes);
+    free(e.functions);
+    return 0;
+  }
+
   if (!analyze_native_slots(&e)) {
     emit_error(&e, "out of memory while selecting native scalar slots.");
     free(e.functions);
+    free(e.classes);
     return 0;
   }
 
@@ -1684,11 +2825,20 @@ int HDEmitC(ASTNode *ast, const HDResolution *resolution,
   fputs("#include \"runtime.h\"\n", out);
   fputs("#include \"ffi.h\"\n", out);
   fputs("#include <stdlib.h>\n\n", out);
+  fputs("#if defined(__GNUC__) || defined(__clang__)\n"
+        "#define HD_CLASS_UNUSED __attribute__((unused))\n"
+        "#else\n"
+        "#define HD_CLASS_UNUSED\n"
+        "#endif\n\n", out);
   /* The Environment is no longer where variables live. It holds the FFI
    * constants, and it is the last link in a name's fallback chain, which is
    * both where those constants are found and where an undefined name
    * finally becomes an error. */
   fputs("static Environment hd_globals;\n\n", out);
+
+  emit_class_layouts(&e);
+  emit_class_prototypes(&e);
+  emit_class_definitions(&e);
 
   /* One static per global slot. Zero-initialised, so nothing is bound until
    * a declaration or an assignment runs, exactly as in the VM. */
@@ -1698,10 +2848,16 @@ int HDEmitC(ASTNode *ast, const HDResolution *resolution,
       if (!symbol)
         continue;
       CRepresentation representation = symbol_representation(&e, symbol);
-      fputs(representation == C_REP_I64 ? "static long long "
-            : representation == C_REP_F64 ? "static double "
-                                          : "static HDValue ",
-            out);
+      if (representation == C_REP_CLASS) {
+        fputs("static ", out);
+        write_class_name(&e, class_from_type(&e, HDTypeOfSymbol(types, symbol->id)));
+        fputs(" *", out);
+      } else {
+        fputs(representation == C_REP_I64 ? "static long long "
+              : representation == C_REP_F64 ? "static double "
+                                            : "static HDValue ",
+              out);
+      }
       write_slot_name(&e, symbol);
       fputs(";\n", out);
       fputs("static int ", out);
@@ -1756,11 +2912,12 @@ int HDEmitC(ASTNode *ast, const HDResolution *resolution,
       emit_error(&e, "out of memory while collecting top-level statements.");
       free(e.unsafe_symbols);
       free(e.functions);
+      free(e.classes);
       return 0;
     }
     for (int i = 0; i < ast->as.block.statement_count; i++) {
       ASTNode *stmt = ast->as.block.statements[i];
-      if (!stmt || stmt->type == AST_FUNC_DECL)
+      if (!stmt || stmt->type == AST_FUNC_DECL || stmt->type == AST_CLASS_DECL)
         continue;
       if (stmt->type == AST_BLOCK && stmt->as.block.statement_count == 0)
         continue;
@@ -1802,5 +2959,6 @@ int HDEmitC(ASTNode *ast, const HDResolution *resolution,
   free(top.as.block.statements);
   free(e.unsafe_symbols);
   free(e.functions);
+  free(e.classes);
   return !e.had_error;
 }

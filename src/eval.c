@@ -160,6 +160,17 @@ static HDValue EvalExpression(ASTNode* node, Environment* env) {
             break;
         }
 
+        case AST_CAST: {
+            HDCastKind kind;
+            if (!HDCastKindFromTypeSyntax(node->as.cast.target_type, &kind)) {
+                printf("Runtime error: cast target must be Bool, an integer type, or F64.\n");
+                break;
+            }
+            HDValue value = EvalExpression(node->as.cast.expression, env);
+            if (!HDCast(kind, value, &val)) val = int_value(0);
+            break;
+        }
+
         case AST_TERNARY_OP: {
             HDValue condition =
                 EvalExpression(node->as.ternary_op.condition, env);

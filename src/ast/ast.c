@@ -47,6 +47,10 @@ ASTNode* ASTNewString(const char* str, int len) {
     return node;
 }
 
+ASTNode* ASTNewThis(void) {
+    return ASTNewNode(AST_THIS);
+}
+
 ASTNode* ASTNewVarRef(const char* name, int len) {
     ASTNode* node = ASTNewNode(AST_VAR_REF);
     node->as.variable_ref.name = name;
@@ -86,6 +90,14 @@ ASTNode* ASTNewUnaryOp(TokenType op, ASTNode* operand) {
     node->as.unary_op.operator_type = op;
     node->as.unary_op.operand = operand;
     if (operand != NULL) node->span = operand->span;
+    return node;
+}
+
+ASTNode* ASTNewCast(TypeSyntax* target_type, ASTNode* expression) {
+    ASTNode* node = ASTNewNode(AST_CAST);
+    node->as.cast.target_type = target_type;
+    node->as.cast.expression = expression;
+    if (expression != NULL) node->span = expression->span;
     return node;
 }
 
@@ -138,6 +150,36 @@ ASTNode* ASTNewIndexAssign(ASTNode* target, ASTNode* index, ASTNode* value) {
 ASTNode* ASTNewArrayLenExpr(ASTNode* target) {
     ASTNode* node = ASTNewNode(AST_ARRAY_LEN_EXPR);
     node->as.array_length_expr.target = target;
+    return node;
+}
+
+ASTNode* ASTNewMemberAccess(ASTNode* target, const char* name, int len) {
+    ASTNode* node = ASTNewNode(AST_MEMBER_ACCESS);
+    node->as.member_access.target = target;
+    node->as.member_access.name = name;
+    node->as.member_access.name_length = len;
+    if (target != NULL) node->span = target->span;
+    return node;
+}
+
+ASTNode* ASTNewMemberAssign(ASTNode* target, ASTNode* value) {
+    ASTNode* node = ASTNewNode(AST_MEMBER_ASSIGN);
+    node->as.member_assignment.target = target;
+    node->as.member_assignment.value = value;
+    if (target != NULL && value != NULL)
+        node->span = HDSourceSpanCover(target->span, value->span);
+    return node;
+}
+
+ASTNode* ASTNewMemberCall(ASTNode* target, const char* name, int len,
+                           ASTNode** args, int arg_count) {
+    ASTNode* node = ASTNewNode(AST_MEMBER_CALL);
+    node->as.member_call.target = target;
+    node->as.member_call.name = name;
+    node->as.member_call.name_length = len;
+    node->as.member_call.arguments = args;
+    node->as.member_call.argument_count = arg_count;
+    if (target != NULL) node->span = target->span;
     return node;
 }
 
@@ -237,6 +279,27 @@ ASTNode* ASTNewFuncDecl(TypeSyntax* return_type, const char* name, int len,
     return node;
 }
 
+ASTNode* ASTNewConstructorDecl(ParameterSyntax* parameters,
+                               int parameter_count, ASTNode* body) {
+    ASTNode* node = ASTNewNode(AST_CONSTRUCTOR_DECL);
+    node->as.constructor_decl.parameters = parameters;
+    node->as.constructor_decl.parameter_count = parameter_count;
+    node->as.constructor_decl.body = body;
+    if (body != NULL) node->span = body->span;
+    return node;
+}
+
+ASTNode* ASTNewClassDecl(const char* name, int len, TypeSyntax* base_type,
+                         ASTNode** members, int member_count) {
+    ASTNode* node = ASTNewNode(AST_CLASS_DECL);
+    node->as.class_decl.name = name;
+    node->as.class_decl.name_length = len;
+    node->as.class_decl.base_type = base_type;
+    node->as.class_decl.members = members;
+    node->as.class_decl.member_count = member_count;
+    return node;
+}
+
 ASTNode* ASTNewReturn(ASTNode* expr) {
     ASTNode* node = ASTNewNode(AST_RETURN);
     node->as.return_statement.expression = expr;
@@ -295,6 +358,10 @@ void ASTPrint(const ASTNode* node, int indent) {
                    node->as.string_literal.value);
             break;
 
+        case AST_THIS:
+            fputs("THIS\n", stdout);
+            break;
+
         case AST_VAR_DECL:
             printf("VARIABLE_DECL %.*s\n", node->as.variable_decl.name_length,
                    node->as.variable_decl.name);
@@ -341,6 +408,14 @@ void ASTPrint(const ASTNode* node, int indent) {
             ASTPrintChild("OPERAND", node->as.unary_op.operand, indent + 1);
             break;
 
+        case AST_CAST:
+            fputs("CAST\n", stdout);
+            ASTPrintIndent(indent + 1);
+            fputs("TARGET_TYPE\n", stdout);
+            TypeSyntaxPrint(node->as.cast.target_type, indent + 2);
+            ASTPrintChild("EXPRESSION", node->as.cast.expression, indent + 1);
+            break;
+
         case AST_TERNARY_OP:
             fputs("TERNARY_OP\n", stdout);
             ASTPrintChild("CONDITION", node->as.ternary_op.condition,
@@ -379,6 +454,32 @@ void ASTPrint(const ASTNode* node, int indent) {
             fputs("ARRAY_LENGTH\n", stdout);
             ASTPrintChild("TARGET", node->as.array_length_expr.target,
                           indent + 1);
+            break;
+
+        case AST_MEMBER_ACCESS:
+            printf("MEMBER_ACCESS %.*s\n",
+                   node->as.member_access.name_length,
+                   node->as.member_access.name);
+            ASTPrintChild("TARGET", node->as.member_access.target, indent + 1);
+            break;
+
+        case AST_MEMBER_ASSIGN:
+            fputs("MEMBER_ASSIGN\n", stdout);
+            ASTPrintChild("TARGET", node->as.member_assignment.target,
+                          indent + 1);
+            ASTPrintChild("VALUE", node->as.member_assignment.value,
+                          indent + 1);
+            break;
+
+        case AST_MEMBER_CALL:
+            printf("MEMBER_CALL %.*s\n", node->as.member_call.name_length,
+                   node->as.member_call.name);
+            ASTPrintChild("TARGET", node->as.member_call.target, indent + 1);
+            for (int i = 0; i < node->as.member_call.argument_count; i++) {
+                ASTPrintIndent(indent + 1);
+                printf("ARGUMENT %d\n", i);
+                ASTPrint(node->as.member_call.arguments[i], indent + 2);
+            }
             break;
 
         case AST_BLOCK:
@@ -464,6 +565,30 @@ void ASTPrint(const ASTNode* node, int indent) {
                                      indent + 2);
             }
             ASTPrintChild("BODY", node->as.function_decl.body, indent + 1);
+            break;
+
+        case AST_CONSTRUCTOR_DECL:
+            fputs("CONSTRUCTOR_DECL this\n", stdout);
+            ASTPrintIndent(indent + 1);
+            printf("PARAMETERS %d\n", node->as.constructor_decl.parameter_count);
+            for (int i = 0; i < node->as.constructor_decl.parameter_count; i++) {
+                ParameterSyntaxPrint(&node->as.constructor_decl.parameters[i],
+                                     indent + 2);
+            }
+            ASTPrintChild("BODY", node->as.constructor_decl.body, indent + 1);
+            break;
+
+        case AST_CLASS_DECL:
+            printf("CLASS_DECL %.*s\n", node->as.class_decl.name_length,
+                   node->as.class_decl.name);
+            if (node->as.class_decl.base_type != NULL) {
+                ASTPrintIndent(indent + 1);
+                fputs("BASE_TYPE\n", stdout);
+                TypeSyntaxPrint(node->as.class_decl.base_type, indent + 2);
+            }
+            for (int i = 0; i < node->as.class_decl.member_count; i++) {
+                ASTPrint(node->as.class_decl.members[i], indent + 1);
+            }
             break;
 
         case AST_LABEL:

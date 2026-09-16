@@ -8,6 +8,8 @@ static ASTNode* ParseStatement(Parser* parser);
 static ASTNode* ParseBlock(Parser* parser);
 static ASTNode* ParseAssignmentExpression(Parser* parser);
 static TypeSyntax* ParseTypeSyntax(Parser* parser);
+static ASTNode* ParseVarDecl(Parser* parser, TypeSyntax* type, Token name);
+static ASTNode* make_inc_dec(ASTNode* target, TokenType op);
 static int ParseParameterList(Parser* parser, int require_names,
                               ParameterSyntax** parameters_out,
                               int* parameter_count_out);
@@ -67,11 +69,16 @@ static int append_parameter(ParameterSyntax** items, int* count, int* capacity,
 
 static void advance(Parser* parser) {
     parser->previous = parser->current;
-    parser->current = LexerNextToken(&parser->lexer);
+    parser->current = parser->next;
+    parser->next = LexerNextToken(&parser->lexer);
 }
 
 static int check(Parser* parser, TokenType type) {
     return parser->current.type == type;
+}
+
+static int check_next(Parser* parser, TokenType type) {
+    return parser->next.type == type;
 }
 
 static int match(Parser* parser, TokenType type) {
@@ -80,6 +87,12 @@ static int match(Parser* parser, TokenType type) {
         return 1;
     }
     return 0;
+}
+
+static int token_match(Token candidate, Token name) {
+    return candidate.type == TOKEN_IDENTIFIER &&
+           candidate.length == name.length &&
+           memcmp(candidate.start, name.start, name.length) == 0;
 }
 
 static void skip_terminators(Parser* parser) {
@@ -539,6 +552,35 @@ static ASTNode* ParseCall(Parser* parser) {
     return span_between(call, name_token.span, end);
 }
 
+/* Keep member calls distinct from the legacy name-only AST_CALL. A later
+ * callee-expression migration can unify them, but this preserves the current
+ * function-call ABI while class syntax gains an honest representation. */
+static ASTNode* ParseMemberCall(Parser* parser, ASTNode* target,
+                                Token member_name) {
+    HDSourceSpan start = target->span;
+    advance(parser); /* opening '(' */
+
+    ASTNode** args = NULL;
+    int arg_count = 0;
+    int arg_capacity = 0;
+    if (!check(parser, TOKEN_RPAREN)) {
+        do {
+            if (!append_node(&args, &arg_count, &arg_capacity,
+                             ParseExpression(parser))) {
+                break;
+            }
+        } while (match(parser, TOKEN_COMMA));
+    }
+
+    int closed = match(parser, TOKEN_RPAREN);
+    ASTNode* call = ASTNewMemberCall(target, member_name.start,
+                                     (int)member_name.length, args, arg_count);
+    HDSourceSpan end = closed ? parser->previous.span
+                              : arg_count > 0 ? args[arg_count - 1]->span
+                                              : member_name.span;
+    return span_between(call, start, end);
+}
+
 static ASTNode* ParsePrimary(Parser* parser) {
     /* These lex now, but no production consumes them. Name the missing
      * feature rather than reporting a bare unexpected token. */
@@ -559,6 +601,8 @@ static ASTNode* ParsePrimary(Parser* parser) {
         return span_token(ASTNewBoolean(1), parser->previous);
     if (match(parser, TOKEN_FALSE))
         return span_token(ASTNewBoolean(0), parser->previous);
+    if (match(parser, TOKEN_THIS))
+        return span_token(ASTNewThis(), parser->previous);
 
     if (match(parser, TOKEN_LPAREN)) {
         Token opening = parser->previous;
@@ -638,21 +682,30 @@ static ASTNode* ParsePostfix(Parser* parser) {
             if (parser->previous.type == TOKEN_RBRACKET)
                 node->span = HDSourceSpanCover(start, parser->previous.span);
         } else if (match(parser, TOKEN_DOT)) {
-            if (!match(parser, TOKEN_IDENTIFIER)) {
+            if (!check(parser, TOKEN_IDENTIFIER)) {
                 parser->had_error = 1;
                 printf("Parse error: Expected property name after '.' on line %zu\n", parser->lexer.line);
                 break;
             }
-            if (token_is_identifier_text(parser->previous, "length")) {
+            Token member_name = parser->current;
+            advance(parser);
+            /* `.length` remains the array-length property, but `.length()`
+             * is a perfectly ordinary class method.  Test the call spelling
+             * first so a method named length does not leave its '(' behind
+             * as the next statement's unexpected token. */
+            if (check(parser, TOKEN_LPAREN)) {
+                node = ParseMemberCall(parser, node, member_name);
+            } else if (token_is_identifier_text(member_name, "length")) {
                 HDSourceSpan start = node->span;
-                HDSourceSpan end = parser->previous.span;
+                HDSourceSpan end = member_name.span;
                 node = ASTNewArrayLenExpr(node);
                 node->span = HDSourceSpanCover(start, end);
             } else {
-                parser->had_error = 1;
-                printf("Parse error: Unknown property '%.*s' on line %zu\n",
-                       (int)parser->previous.length, parser->previous.start,
-                       parser->lexer.line);
+                ASTNode* target = node;
+                HDSourceSpan start = target->span;
+                node = ASTNewMemberAccess(target, member_name.start,
+                                          (int)member_name.length);
+                node->span = HDSourceSpanCover(start, member_name.span);
             }
         } else {
             break;
@@ -700,6 +753,47 @@ static ASTNode* ParsePower(Parser* parser) {
 }
 
 static ASTNode* ParseUnary(Parser* parser) {
+    if (match(parser, TOKEN_CAST)) {
+        Token cast_token = parser->previous;
+        if (!match(parser, TOKEN_LPAREN)) {
+            parser->had_error = 1;
+            printf("Parse error: Expected '(' after cast on line %zu\n",
+                   parser->lexer.line);
+            return NULL;
+        }
+        TypeSyntax* target_type = ParseTypeSyntax(parser);
+        if (target_type == NULL || !match(parser, TOKEN_RPAREN)) {
+            parser->had_error = 1;
+            printf("Parse error: Expected a type and ')' in cast on line %zu\n",
+                   parser->lexer.line);
+            return NULL;
+        }
+        ASTNode* expression = ParseUnary(parser);
+        ASTNode* cast = ASTNewCast(target_type, expression);
+        if (expression != NULL)
+            cast->span = HDSourceSpanCover(cast_token.span, expression->span);
+        return cast;
+    }
+    if (check(parser, TOKEN_PLUSPLUS) || check(parser, TOKEN_MINUSMINUS)) {
+        Token operator_token = parser->current;
+        TokenType op = parser->current.type;
+        advance(parser);
+
+        /* Prefix ++/-- need an assignable variable.  They lower to the same
+         * assignment tree as the existing postfix statement form, so every
+         * backend observes the same read, arithmetic, and write sequence. */
+        ASTNode* target = ParsePostfix(parser);
+        if (target == NULL || target->type != AST_VAR_REF) {
+            parser->had_error = 1;
+            printf("Parse error: Expected a variable after '%s' on line %zu\n",
+                   op == TOKEN_PLUSPLUS ? "++" : "--", parser->lexer.line);
+            return target;
+        }
+
+        ASTNode* increment = make_inc_dec(target, op);
+        increment->span = HDSourceSpanCover(operator_token.span, target->span);
+        return increment;
+    }
     if (check(parser, TOKEN_BANG) || check(parser, TOKEN_MINUS)) {
         Token operator_token = parser->current;
         TokenType op = parser->current.type;
@@ -933,6 +1027,16 @@ static ASTNode* ParseAssignmentExpression(Parser* parser) {
                                                     ParseExpression(parser)));
         }
     }
+
+    if (expr != NULL && expr->type == AST_MEMBER_ACCESS) {
+        if (match(parser, TOKEN_ASSIGN)) {
+            ASTNode* value = ParseExpression(parser);
+            ASTNode* assignment = ASTNewMemberAssign(expr, value);
+            if (value != NULL)
+                assignment->span = HDSourceSpanCover(expr->span, value->span);
+            return assignment;
+        }
+    }
     return expr;
 }
 
@@ -1160,6 +1264,104 @@ static ASTNode* ParseFuncDecl(Parser* parser, TypeSyntax* return_type,
     return function;
 }
 
+static ASTNode* ParseConstructorDecl(Parser* parser, HDSourceSpan start) {
+    ParameterSyntax* parameters = NULL;
+    int parameter_count = 0;
+    if (!match(parser, TOKEN_LPAREN)) {
+        parser->had_error = 1;
+        printf("Parse error: Expected '(' after constructor name on line %zu\n",
+               parser->lexer.line);
+        return NULL;
+    }
+    if (!ParseParameterList(parser, 1, &parameters, &parameter_count)) {
+        return NULL;
+    }
+    skip_terminators(parser);
+
+    ASTNode* body = ParseBlock(parser);
+    ASTNode* constructor =
+        ASTNewConstructorDecl(parameters, parameter_count, body);
+    if (body != NULL)
+        constructor->span = HDSourceSpanCover(start, body->span);
+    return constructor;
+}
+
+/* A class body is a declaration-only scope. Fields, methods, and D-style
+ * constructors all become ordinary AST members; instance execution and
+ * layout deliberately stay for the semantic/backend stage. */
+static ASTNode* ParseClassDecl(Parser* parser, HDSourceSpan start) {
+    if (!check(parser, TOKEN_IDENTIFIER)) {
+        parser->had_error = 1;
+        printf("Parse error: Expected class name on line %zu\n", parser->lexer.line);
+        return NULL;
+    }
+    Token name = parser->current;
+    advance(parser);
+
+    TypeSyntax* base_type = NULL;
+    if (match(parser, TOKEN_COLON)) {
+        base_type = ParseTypeSyntax(parser);
+        if (base_type == NULL) return NULL;
+    }
+
+    if (!match(parser, TOKEN_LBRACE)) {
+        parser->had_error = 1;
+        printf("Parse error: Expected '{' after class declaration on line %zu\n",
+               parser->lexer.line);
+        return NULL;
+    }
+
+    ASTNode** members = NULL;
+    int member_count = 0;
+    int member_capacity = 0;
+    skip_terminators(parser);
+    while (!check(parser, TOKEN_RBRACE) && !check(parser, TOKEN_EOF)) {
+        ASTNode* member = NULL;
+        if (match(parser, TOKEN_THIS)) {
+            member = ParseConstructorDecl(parser, parser->previous.span);
+        } else if (token_match(parser->current, name) &&
+                   check_next(parser, TOKEN_LPAREN)) {
+            advance(parser);
+            member = ParseConstructorDecl(parser, parser->previous.span);
+        } else {
+            HDSourceSpan member_start = parser->current.span;
+            TypeSyntax* member_type = ParseTypeSyntax(parser);
+            if (member_type == NULL) return NULL;
+            if (!check(parser, TOKEN_IDENTIFIER)) {
+                parser->had_error = 1;
+                printf("Parse error: Expected member name after type on line %zu\n",
+                       parser->lexer.line);
+                return NULL;
+            }
+            Token member_name = parser->current;
+            advance(parser);
+            if (check(parser, TOKEN_LPAREN))
+                member = ParseFuncDecl(parser, member_type, member_name);
+            else
+                member = ParseVarDecl(parser, member_type, member_name);
+            if (member != NULL)
+                member->span = HDSourceSpanCover(member_start, member->span);
+        }
+
+        if (member == NULL || !append_node(&members, &member_count,
+                                            &member_capacity, member)) {
+            parser->had_error = 1;
+            return NULL;
+        }
+        skip_terminators(parser);
+    }
+
+    if (!match(parser, TOKEN_RBRACE)) {
+        parser->had_error = 1;
+        printf("Parse error: Expected '}' after class body on line %zu\n",
+               parser->lexer.line);
+        return NULL;
+    }
+    ASTNode* declaration = ASTNewClassDecl(name.start, (int)name.length,
+                                           base_type, members, member_count);
+    return span_between(declaration, start, parser->previous.span);
+}
+
 static ASTNode* ParseIgnoredDirective(Parser* parser) {
     HDSourceSpan start = parser->previous.span;
     while (!check(parser, TOKEN_SEMICOLON) &&
@@ -1242,6 +1444,8 @@ static ASTNode* ParseStatement(Parser* parser) {
     if (match(parser, TOKEN_BREAK)) return ParseJumpOut(parser, ASTNewBreak());
     if (match(parser, TOKEN_CONTINUE))
         return ParseJumpOut(parser, ASTNewContinue());
+    if (match(parser, TOKEN_CLASS))
+        return ParseClassDecl(parser, parser->previous.span);
 
     HDSourceSpan declaration_start = parser->current.span;
     TypeSyntax* declared_type = ParseOptionalDeclarationType(parser);
@@ -1303,11 +1507,14 @@ static ASTNode* ParseStatement(Parser* parser) {
 }
 
 void ParserInit(Parser* parser, const char* source) {
-    memset(&parser->current, 0, sizeof(parser->current));
     memset(&parser->previous, 0, sizeof(parser->previous));
     LexerInit(&parser->lexer, source);
     parser->had_error = 0;
-    advance(parser); // Load the first token
+    /* `advance` shifts current <- next, so both tokens must be loaded before
+     * parsing starts. Calling it from an all-zero parser would make current
+     * look like TOKEN_EOF and skip the entire source file. */
+    parser->current = LexerNextToken(&parser->lexer);
+    parser->next = LexerNextToken(&parser->lexer);
 }
 
 ASTNode* ParseProgram(Parser* parser) {

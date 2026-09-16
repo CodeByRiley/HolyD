@@ -137,11 +137,15 @@ Still missing:
 Bitwise complement ~x. The token is TOKEN_TILDE, which already means
 concatenation as a binary operator, so this needs the unary/binary
 distinction the parser now has for minus.
-Postfix/prefix ++/-- as expressions. They parse as statements only; `b =
-a++` does not work.
+Postfix and prefix ++/-- currently lower as statements only; `++a;` and
+`a++;` work, but `b = ++a` and `b = a++` do not yet preserve an expression
+value.
 Done: ternary `cond ? a : b`, including right associativity and lazy branch
 evaluation on the VM, interpreter, and C backend.
-Cast: cast(Type) expression only.
+Done: `cast(Type) expression` for Bool, integer, and F64 targets. Integer
+casts truncate toward zero; all integer spellings currently share the
+runtime's signed 64-bit storage. Pointer, string, array, and class-reference
+casts still need explicit semantic rules.
 Identity and membership: is, !is, in, and !in.
 D is expressions use AST_IS_EXPRESSION; is and !is identity operations stay
 in AST_BINARY_OP with the other binary operators.
@@ -237,6 +241,16 @@ constructors, ~this() destructors, and method dispatch. Do not use a
 C++-style constructor named after the class. Define destruction and
 allocation policy explicitly instead of adding C++ syntax by habit.
 This is the phase where you'll want to start thinking hard about your type system and symbol table , you can't do member access without knowing struct layouts.
+
+Current first executable slice: the C backend lowers `AST_CLASS_DECL` into a
+heap-allocated C struct, embeds a base struct for inheritance, and emits
+constructor factories plus receiver methods. It supports scalar and class
+fields, `this.field`, `object.field`, method calls, both `this(...)` and
+class-name constructor spelling, and inherited field/method lookup. A derived
+class with no constructor currently forwards matching arguments to its base;
+that is intentionally a bridge until explicit `super(...)` semantics exist.
+The bytecode, assembly, direct-PE, and interpreter backends remain class-free
+and reject class programs clearly.
 
 ## 7. Pointers and arrays
 

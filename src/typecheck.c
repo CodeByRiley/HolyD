@@ -181,7 +181,8 @@ static void check_stmt(Checker *checker, ASTNode *node);
 static HDTypeId named_type(HDTypeCheck *result, const char *name, int length) {
   if (text_is(name, length, "U0") || text_is(name, length, "void"))
     return TYPE_VOID_ID;
-  if (text_is(name, length, "bool")) return TYPE_BOOL_ID;
+  if (text_is(name, length, "Bool") || text_is(name, length, "bool"))
+    return TYPE_BOOL_ID;
   if (text_is(name, length, "I8")) return TYPE_I8_ID;
   if (text_is(name, length, "U8")) return TYPE_U8_ID;
   if (text_is(name, length, "I16")) return TYPE_I16_ID;
@@ -390,6 +391,10 @@ static HDTypeId infer_expr(Checker *checker, ASTNode *node) {
     if (node->as.unary_op.operator_type == TOKEN_BANG)
       infer_expr(checker, node->as.unary_op.operand);
     break;
+  case AST_CAST:
+    infer_expr(checker, node->as.cast.expression);
+    type = type_from_syntax(checker, node->as.cast.target_type);
+    break;
   case AST_TERNARY_OP: {
     infer_expr(checker, node->as.ternary_op.condition);
     HDTypeId yes = infer_expr(checker, node->as.ternary_op.true_expr);
@@ -470,21 +475,30 @@ static void check_stmt(Checker *checker, ASTNode *node) {
   case AST_ASSIGN:
   case AST_INDEX:
   case AST_ARRAY_LEN_EXPR:
+  case AST_MEMBER_ACCESS:
+  case AST_MEMBER_CALL:
   case AST_CALL:
   case AST_ARRAY_LITERAL:
   case AST_BINARY_OP:
   case AST_UNARY_OP:
+  case AST_CAST:
   case AST_TERNARY_OP:
   case AST_VAR_REF:
   case AST_NUMBER:
   case AST_FLOAT:
   case AST_STRING:
+  case AST_THIS:
     infer_expr(checker, node);
     break;
   case AST_INDEX_ASSIGN:
     infer_expr(checker, node->as.index_assignment.target);
     infer_expr(checker, node->as.index_assignment.index);
     infer_expr(checker, node->as.index_assignment.value);
+    set_node_type(result, node, TYPE_VOID_ID);
+    break;
+  case AST_MEMBER_ASSIGN:
+    infer_expr(checker, node->as.member_assignment.target);
+    infer_expr(checker, node->as.member_assignment.value);
     set_node_type(result, node, TYPE_VOID_ID);
     break;
   case AST_BLOCK:
@@ -560,6 +574,15 @@ static void check_stmt(Checker *checker, ASTNode *node) {
       set_node_type(result, node, intern_type(result, function));
       free(function.parameters);
     }
+    break;
+  case AST_CONSTRUCTOR_DECL:
+    check_stmt(checker, node->as.constructor_decl.body);
+    set_node_type(result, node, TYPE_VOID_ID);
+    break;
+  case AST_CLASS_DECL:
+    for (int i = 0; i < node->as.class_decl.member_count; i++)
+      check_stmt(checker, node->as.class_decl.members[i]);
+    set_node_type(result, node, TYPE_VOID_ID);
     break;
   case AST_RETURN:
     infer_expr(checker, node->as.return_statement.expression);
@@ -678,15 +701,42 @@ static void print_type(const HDTypeCheck *result, HDTypeId id) {
 }
 
 static const char *node_name(ASTNodeType type) {
-  static const char *names[] = {
-      "integer", "float", "string", "declaration", "reference", "assignment",
-      "index-assignment", "binary", "unary", "ternary", "call", "array",
-      "index", "length", "block", "if", "while", "for", "foreach", "goto",
-      "label", "function", "class", "struct", "enum", "enum-value", "break",
-      "continue", "return"};
-  int count = (int)(sizeof(names) / sizeof(names[0]));
-  int index = (int)type;
-  return index >= 0 && index < count ? names[index] : "node";
+  switch (type) {
+  case AST_NUMBER: return "integer";
+  case AST_FLOAT: return "float";
+  case AST_STRING: return "string";
+  case AST_VAR_DECL: return "declaration";
+  case AST_VAR_REF: return "reference";
+  case AST_ASSIGN: return "assignment";
+  case AST_INDEX_ASSIGN: return "index-assignment";
+  case AST_BINARY_OP: return "binary";
+  case AST_UNARY_OP: return "unary";
+  case AST_CAST: return "cast";
+  case AST_TERNARY_OP: return "ternary";
+  case AST_CALL: return "call";
+  case AST_ARRAY_LITERAL: return "array";
+  case AST_INDEX: return "index";
+  case AST_ARRAY_LEN_EXPR: return "length";
+  case AST_MEMBER_ACCESS: return "member";
+  case AST_MEMBER_ASSIGN: return "member-assignment";
+  case AST_MEMBER_CALL: return "member-call";
+  case AST_BLOCK: return "block";
+  case AST_IF: return "if";
+  case AST_WHILE: return "while";
+  case AST_FOR: return "for";
+  case AST_FOREACH: return "foreach";
+  case AST_GOTO: return "goto";
+  case AST_LABEL: return "label";
+  case AST_BREAK: return "break";
+  case AST_CONTINUE: return "continue";
+  case AST_FUNC_DECL: return "function";
+  case AST_THIS: return "this";
+  case AST_CONSTRUCTOR_DECL: return "constructor";
+  case AST_STRUCT_DECL: return "struct";
+  case AST_CLASS_DECL: return "class";
+  case AST_RETURN: return "return";
+  }
+  return "node";
 }
 
 static void print_nodes(const HDTypeCheck *result, const ASTNode *node) {
@@ -702,6 +752,7 @@ static void print_nodes(const HDTypeCheck *result, const ASTNode *node) {
     print_nodes(result, node->as.binary_op.left);
     print_nodes(result, node->as.binary_op.right); break;
   case AST_UNARY_OP: print_nodes(result, node->as.unary_op.operand); break;
+  case AST_CAST: print_nodes(result, node->as.cast.expression); break;
   case AST_TERNARY_OP:
     print_nodes(result, node->as.ternary_op.condition);
     print_nodes(result, node->as.ternary_op.true_expr);

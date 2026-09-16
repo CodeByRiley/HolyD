@@ -522,6 +522,9 @@ static int scratch_for_expr(Asm *a, ASTNode *node) {
     return (node->as.unary_op.operator_type == TOKEN_MINUS ? 2 : 1) +
            scratch_for_expr(a, node->as.unary_op.operand);
 
+  case AST_CAST:
+    return 1 + scratch_for_expr(a, node->as.cast.expression);
+
   case AST_TERNARY_OP:
     return max_int(
         1 + scratch_for_expr(a, node->as.ternary_op.condition),
@@ -859,6 +862,20 @@ static void emit_expr(Asm *a, ASTNode *node, Loc dest, int next) {
       emit_error(a, "unsupported unary operator.");
     }
     break;
+
+  case AST_CAST: {
+    HDCastKind kind;
+    if (!HDCastKindFromTypeSyntax(node->as.cast.target_type, &kind)) {
+      emit_error(a, "cast target must be Bool, an integer type, or F64.");
+      break;
+    }
+    emit_expr(a, node->as.cast.expression, loc_scratch(a, next), next + 1);
+    arg_addr(a, 0, dest);
+    arg_i32(a, 1, (int)kind);
+    arg_addr(a, 2, loc_scratch(a, next));
+    call(a, "HDCastX");
+    break;
+  }
 
   case AST_TERNARY_OP: {
     int other = new_label(a);
@@ -1319,6 +1336,8 @@ static int calls_name(ASTNode *node, const char *name, int len) {
            calls_name(node->as.binary_op.right, name, len);
   case AST_UNARY_OP:
     return calls_name(node->as.unary_op.operand, name, len);
+  case AST_CAST:
+    return calls_name(node->as.cast.expression, name, len);
   case AST_TERNARY_OP:
     return calls_name(node->as.ternary_op.condition, name, len) ||
            calls_name(node->as.ternary_op.true_expr, name, len) ||

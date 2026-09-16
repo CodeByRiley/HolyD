@@ -587,6 +587,19 @@ static void compile_expression(Compiler *compiler, BytecodeChunk *chunk,
       emit_int(chunk, 0);
     }
     break;
+  case AST_CAST: {
+    HDCastKind kind;
+    if (!HDCastKindFromTypeSyntax(node->as.cast.target_type, &kind)) {
+      compile_error(compiler, "cast target must be Bool, an integer type, or F64.");
+      emit_int(chunk, 0);
+      break;
+    }
+    compile_expression(compiler, chunk, node->as.cast.expression);
+    Instruction instruction = make_ins(BC_CAST);
+    instruction.operand = (int)kind;
+    emit(chunk, instruction);
+    break;
+  }
   case AST_TERNARY_OP: {
     compile_expression(compiler, chunk, node->as.ternary_op.condition);
     int false_jump = emit_jump(chunk, BC_FLOW_JUMP_IF_FALSE);
@@ -1407,6 +1420,15 @@ static int run_chunk(VM *vm, BytecodeChunk *chunk, Environment *env,
         return 0;
       break;
 
+    case BC_CAST:
+      if (!pop_value(stack, &sp, &value))
+        return 0;
+      if (!HDCast((HDCastKind)ins->operand, value, &value))
+        return 0;
+      if (!push_value(stack, &sp, value))
+        return 0;
+      break;
+
     case BC_FLOW_JUMP:
       ip = ins->operand;
       break;
@@ -1527,6 +1549,8 @@ static const char *op_name(BytecodeOp op) {
     return "MATH_POW";
   case BC_LOGIC_NOT:
     return "LOGIC_NOT";
+  case BC_CAST:
+    return "CAST";
   case BC_BIT_AND:
     return "BIT_AND";
   case BC_BIT_OR:
@@ -1587,7 +1611,7 @@ static void dump_chunk(const char *name, BytecodeChunk *chunk) {
       printf(" %.*s slot=%d", ins->text_len, ins->text, ins->operand);
       if (ins->fallback >= 0)
         printf(" else global slot=%d", ins->fallback);
-    } else if (ins->op == BC_ARRAY_CREATE || ins->op == BC_FLOW_JUMP ||
+    } else if (ins->op == BC_CAST || ins->op == BC_ARRAY_CREATE || ins->op == BC_FLOW_JUMP ||
                ins->op == BC_FLOW_JUMP_IF_FALSE) {
       printf(" %d", ins->operand);
     }
