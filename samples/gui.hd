@@ -5,7 +5,7 @@
  * Arrows move the box, click to teleport it under the pointer, SPACE
  * recentres, ESC or the close button quits. The shape of the loop , drain
  * every event, redraw the whole surface from state, invalidate, sleep , is
- * the shape every winman client takes; the Win* natives are lib/wm and
+ * the shape every heimdall client takes; the Win* natives are lib/wm and
  * lib/gfx under HolyD names.
  *
  * Two dialect notes, so the code below does not read as clumsy: there is no
@@ -51,7 +51,7 @@ U0 DrawFrame(I64 win, I64 bx, I64 by, I64 mx, I64 my, I64 clicks) {
 U0 main() {
     I64 win = WinCreate(WIN_W, WIN_H, "HolyD GUI", WIN_STATUSBAR);
     if (win < 0) {
-        PrintLn("gui: WinCreate failed , is winman running?");
+        PrintLn("gui: WinCreate failed , is heimdall running?");
         return -1;
     }
 
@@ -116,7 +116,7 @@ U0 main() {
         DrawFrame(win, bx, by, mx, my, clicks);
         WinInvalidate(win);
 
-        /* Without this the loop spins and starves winman of the CPU it
+        /* Without this the loop spins and starves heimdall of the CPU it
          * needs to composite what was just drawn. */
         Sleep(16);
     }

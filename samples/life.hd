@@ -152,7 +152,7 @@ U0 main() {
     I64 win = WinCreate(W * CELL, H * CELL + HEADER_H, "HolyD , Life",
                         WIN_STATUSBAR);
     if (win < 0) {
-        PrintLn("life: WinCreate failed , is winman running?");
+        PrintLn("life: WinCreate failed , is heimdall running?");
         return -1;
     }
 

@@ -3,7 +3,7 @@
  * Nothing in this file talks to an operating system. Windows arrive as a
  * pixel buffer from ffi_platform.h's host, and the drawing natives are
  * lib/gfx.c over that buffer, which is pure arithmetic , so the same code
- * serves winman on TOS and a DIB section on Windows. Sockets, input and
+ * serves heimdall on TOS and a DIB section on Windows. Sockets, input and
  * sleeping are the host's too. See ffi_tos.c and ffi_win32.c.
  *
  * Two conventions run through the natives:
@@ -568,7 +568,7 @@ static HDValue native_win_text_width(int arg_count, HDValue *args) {
 /* WinPollEvent([I64 handle]) -> I64 event, EV_NONE when nothing is queued.
  *
  * The handle is only needed for EV_RESIZE, and only on a host whose resize
- * notification cannot name the window it belongs to , winman's cannot. The
+ * notification cannot name the window it belongs to , heimdall's cannot. The
  * window is picked in that order: what the event says, then what the caller
  * named, then the only open window. If none of those resolve, the event is
  * still reported and the surface keeps pointing at the old backing, so

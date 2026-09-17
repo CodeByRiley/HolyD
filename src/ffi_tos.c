@@ -1,14 +1,14 @@
 /* userspace/bin/holyd/ffi_tos.c , the TOS host for HolyD's natives.
  *
- * Windows are winman's, reached over the IPC handshake in lib/wm.c, and the
- * pixels are a page-aligned buffer winman maps into this process. Sockets
+ * Windows are heimdall's, reached over the IPC handshake in lib/wm.c, and the
+ * pixels are a page-aligned buffer heimdall maps into this process. Sockets
  * are the kernel's, through musl's POSIX wrappers.
  *
  * The only thing here that is not a thin wrapper is the handle table.
- * Winman's handle space is its own business and has changed size before, so
- * a script never sees a winman handle , it gets an index into `slots`, and
+ * Heimdall's handle space is its own business and has changed size before, so
+ * a script never sees a heimdall handle , it gets an index into `slots`, and
  * this file translates. That keeps ffi.c's table bounded by HD_MAX_WINDOWS
- * no matter what winman does.
+ * no matter what heimdall does.
  */
 #include "ffi_platform.h"
 
@@ -22,25 +22,25 @@
 #include <sys/socket.h>
 
 /* A script comparing against EV_KEY_DOWN is comparing against a number that
- * came off winman's wire. If these ever diverge the events would decode as
+ * came off heimdall's wire. If these ever diverge the events would decode as
  * each other, which is the kind of bug that looks like bad input handling. */
-static_assert((int)HD_EV_NONE == (int)WM_EV_NONE, "event codes must match winman");
-static_assert((int)HD_EV_KEY_DOWN == (int)WM_EV_KEY_DOWN, "event codes must match winman");
-static_assert((int)HD_EV_KEY_UP == (int)WM_EV_KEY_UP, "event codes must match winman");
-static_assert((int)HD_EV_MOUSE_MOVE == (int)WM_EV_MOUSE_MOVE, "event codes must match winman");
-static_assert((int)HD_EV_MOUSE_DOWN == (int)WM_EV_MOUSE_DOWN, "event codes must match winman");
-static_assert((int)HD_EV_MOUSE_UP == (int)WM_EV_MOUSE_UP, "event codes must match winman");
-static_assert((int)HD_EV_RESIZE == (int)WM_EV_RESIZE, "event codes must match winman");
-static_assert((int)HD_EV_QUIT == (int)WM_EV_QUIT, "event codes must match winman");
-static_assert((int)HD_PROMPT_MESSAGE == (int)WM_PROMPT_MESSAGE, "prompt kinds must match winman");
-static_assert((int)HD_PROMPT_CONFIRM == (int)WM_PROMPT_CONFIRM, "prompt kinds must match winman");
-static_assert((int)HD_PROMPT_TEXT == (int)WM_PROMPT_TEXT, "prompt kinds must match winman");
-static_assert((int)HD_PROMPT_CANCEL == (int)WM_PROMPT_CANCEL, "prompt answers must match winman");
-static_assert((int)HD_PROMPT_OK == (int)WM_PROMPT_OK, "prompt answers must match winman");
-static_assert((int)HD_PROMPT_NO == (int)WM_PROMPT_NO, "prompt answers must match winman");
-static_assert((int)HD_CREATE_STATUSBAR == (int)WM_CREATE_STATUSBAR, "flags must match winman");
+static_assert((int)HD_EV_NONE == (int)WM_EV_NONE, "event codes must match heimdall");
+static_assert((int)HD_EV_KEY_DOWN == (int)WM_EV_KEY_DOWN, "event codes must match heimdall");
+static_assert((int)HD_EV_KEY_UP == (int)WM_EV_KEY_UP, "event codes must match heimdall");
+static_assert((int)HD_EV_MOUSE_MOVE == (int)WM_EV_MOUSE_MOVE, "event codes must match heimdall");
+static_assert((int)HD_EV_MOUSE_DOWN == (int)WM_EV_MOUSE_DOWN, "event codes must match heimdall");
+static_assert((int)HD_EV_MOUSE_UP == (int)WM_EV_MOUSE_UP, "event codes must match heimdall");
+static_assert((int)HD_EV_RESIZE == (int)WM_EV_RESIZE, "event codes must match heimdall");
+static_assert((int)HD_EV_QUIT == (int)WM_EV_QUIT, "event codes must match heimdall");
+static_assert((int)HD_PROMPT_MESSAGE == (int)WM_PROMPT_MESSAGE, "prompt kinds must match heimdall");
+static_assert((int)HD_PROMPT_CONFIRM == (int)WM_PROMPT_CONFIRM, "prompt kinds must match heimdall");
+static_assert((int)HD_PROMPT_TEXT == (int)WM_PROMPT_TEXT, "prompt kinds must match heimdall");
+static_assert((int)HD_PROMPT_CANCEL == (int)WM_PROMPT_CANCEL, "prompt answers must match heimdall");
+static_assert((int)HD_PROMPT_OK == (int)WM_PROMPT_OK, "prompt answers must match heimdall");
+static_assert((int)HD_PROMPT_NO == (int)WM_PROMPT_NO, "prompt answers must match heimdall");
+static_assert((int)HD_CREATE_STATUSBAR == (int)WM_CREATE_STATUSBAR, "flags must match heimdall");
 
-/* slots[i] holds the winman handle for HolyD handle i + 1, or 0 when free. */
+/* slots[i] holds the heimdall handle for HolyD handle i + 1, or 0 when free. */
 static int slots[HD_MAX_WINDOWS];
 
 static int to_wm(int handle) {
@@ -97,7 +97,7 @@ int hdp_window_present(int handle) {
 }
 
 int hdp_poll_event(int handle, struct hdp_event *out) {
-    (void)handle; /* winman's queue is per-process, not per-window. */
+    (void)handle; /* heimdall's queue is per-process, not per-window. */
 
     struct wm_event ev;
     if (!wm_poll_event(&ev)) return 0;

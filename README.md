@@ -242,7 +242,7 @@ src/            the language, and the natives
                   calls only ever touch a gfx_surface.
   ffi_platform.h  what a host has to provide , about fourteen functions
   ffi_win32.c     CreateWindowEx over a top-down DIB section
-  ffi_tos.c       the other host: winman over IPC. Built inside the TOS
+  ffi_tos.c       the other host: heimdall over IPC. Built inside the TOS
                   tree, not here.
   platform/       adapters for gfx, BMP, keycodes, and font8x8
     standalone/   HolyD-owned implementations used away from TOS
@@ -253,7 +253,7 @@ docs/roadmap.md what the language is still missing
 ```
 
 The reason one `ffi.c` serves both hosts is that `lib/gfx.c` is pure
-arithmetic over a pixel buffer with no system calls in it. winman hands a
+arithmetic over a pixel buffer with no system calls in it. heimdall hands a
 client a raw BGRA buffer; a DIB section is also a raw BGRA buffer. So the
 drawing natives never needed porting , only window creation, input, sleeping
 and sockets did, and those are `ffi_platform.h`.

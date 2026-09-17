@@ -2,7 +2,7 @@
  *
  * A window is a plain CreateWindowEx over a top-down 32-bit DIB section, and
  * the DIB's bits are handed to ffi.c as the drawing surface. That is the
- * whole trick: winman also hands out a raw BGRA buffer, so lib/gfx.c draws
+ * whole trick: heimdall also hands out a raw BGRA buffer, so lib/gfx.c draws
  * into a Win32 window through exactly the same code path it uses on TOS, and
  * a .hd script does not know the difference.
  *
@@ -51,7 +51,7 @@ struct win32_window {
 static struct win32_window windows[HD_MAX_WINDOWS];
 static int                 class_registered;
 
-/* One queue for every window, like winman's per-process queue. Entries carry
+/* One queue for every window, like heimdall's per-process queue. Entries carry
  * the handle so a resize can name the window it belongs to. */
 static struct hdp_event events[HD_EVENT_CAP];
 static int              event_head, event_count;
@@ -171,7 +171,7 @@ static int make_dib(struct win32_window *w) {
     return 0;
 }
 
-/* Paint the status strip into the rows below the client area. Winman draws
+/* Paint the status strip into the rows below the client area. Heimdall draws
  * its own strip, so on this side the host owns those rows too , the script's
  * surface stops at w->h and never sees them. */
 static void draw_status(struct win32_window *w) {
@@ -390,7 +390,7 @@ int hdp_window_set_title(int handle, const char *title) {
 int hdp_window_set_status(int handle, const char *text) {
     struct win32_window *w = lookup(handle);
     if (w == NULL) return -1;
-    if (w->status_h == 0) return 0; /* no strip: the same no-op winman is */
+    if (w->status_h == 0) return 0; /* no strip: the same no-op heimdall is */
 
     snprintf(w->status, sizeof(w->status), "%s", text ? text : "");
     draw_status(w);
@@ -407,7 +407,7 @@ int hdp_window_present(int handle) {
 }
 
 int hdp_poll_event(int handle, struct hdp_event *out) {
-    (void)handle; /* one queue, like winman's; entries name their window */
+    (void)handle; /* one queue, like heimdall's; entries name their window */
     pump();
     return pop_event(out);
 }

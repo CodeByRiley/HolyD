@@ -9,7 +9,7 @@
 #   make clean
 #
 # Windows only for now: the one host implementation here is ffi_win32.c.
-# src/ffi_tos.c is the other one , winman over IPC , and is built inside the
+# src/ffi_tos.c is the other one , heimdall over IPC , and is built inside the
 # TOS tree rather than here. See README.md.
 
 CC      ?= gcc

@@ -7,7 +7,7 @@
  * and sockets , so those are the only functions a new host implements.
  *
  * Two hosts exist:
- *   ffi_tos.c    , winman over IPC, TOS syscalls, the kernel's sockets
+ *   ffi_tos.c    , heimdall over IPC, TOS syscalls, the kernel's sockets
  *   ffi_win32.c  , CreateWindowEx over a DIB section, winsock
  *
  * The contract is deliberately narrow. A host hands back a pixel buffer and
@@ -27,7 +27,7 @@
 #define HD_CREATE_STATUSBAR 0x1u
 
 /* Event codes. These are the numbers a script compares against EV_*, and
- * they match winman's WM_EV_* so the TOS host can pass them through
+ * they match heimdall's WM_EV_* so the TOS host can pass them through
  * unchanged; ffi_tos.c static-asserts that. */
 enum {
     HD_EV_NONE       = 0,
@@ -40,7 +40,7 @@ enum {
     HD_EV_QUIT       = 101,
 };
 
-/* Prompt kinds and answers, matching winman's WM_PROMPT_*. */
+/* Prompt kinds and answers, matching heimdall's WM_PROMPT_*. */
 enum {
     HD_PROMPT_MESSAGE = 0,
     HD_PROMPT_CONFIRM = 1,
